@@ -103,7 +103,44 @@ Diese Schwächen sind im Repo als Issues getrackt — Pull Requests willkommen.
 
 ---
 
-## Setup auf neuem Gerät
+## Installation
+
+### macOS — empfohlen: Homebrew Cask
+
+```bash
+brew install --cask dzieciol-dev/streichzeug/streichzeug
+```
+
+Brew lädt das DMG, entfernt das Quarantäne-Attribut und installiert
+nach `/Applications/`. Kein „App ist beschädigt"-Dialog. Updates:
+`brew upgrade --cask streichzeug`.
+
+### macOS — manueller Download
+
+Aktuelles DMG aus den
+[GitHub Releases](https://github.com/dzieciol-dev/streichzeug/releases).
+Nach dem Drag-and-Drop in `/Applications/` blockt macOS die App,
+weil die Binary noch nicht Apple-Developer-signiert ist (Apple
+Developer Account kostet 99 €/Jahr — kommt später). Einmaliger
+Workaround im Terminal:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Streichzeug.app
+```
+
+Dann normal über Launchpad starten.
+
+### Windows
+
+MSI-Installer aus den
+[GitHub Releases](https://github.com/dzieciol-dev/streichzeug/releases).
+Doppelklick → SmartScreen kann „Computer wurde geschützt" zeigen
+(unsignierter Installer) → „Weitere Informationen" → „Trotzdem
+ausführen".
+
+---
+
+## Build aus Source
 
 ### macOS
 

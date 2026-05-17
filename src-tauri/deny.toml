@@ -38,6 +38,7 @@ ignore = [
     "RUSTSEC-2025-0081", # instant unmaintained
     "RUSTSEC-2025-0098", # weitere unmaintained-Advisories aus Tauri-Tree
     "RUSTSEC-2025-0100", # weitere unmaintained-Advisories aus Tauri-Tree
+    "RUSTSEC-2024-0436", # paste 1.0.15 — Author hat das Repo archiviert
 ]
 
 # =================================================================== Licenses

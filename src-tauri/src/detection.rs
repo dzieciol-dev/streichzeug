@@ -452,7 +452,7 @@ pub fn apply_strict_with_hint(text: &str, findings: &[Finding]) -> String {
 /// (z. B. „«Person A»", „«Person B»", „«Organisation A»"). Wiederholungen
 /// desselben normalisierten Originals bekommen denselben Platzhalter —
 /// damit ein LLM weiß, dass dieselbe Entität erneut auftritt.
-fn assign_strict_labels(findings: &mut Vec<Finding>) {
+fn assign_strict_labels(findings: &mut [Finding]) {
     use std::collections::HashMap;
 
     // Reihenfolge im Text bestimmt die Buchstaben-Vergabe — wer zuerst

@@ -119,7 +119,7 @@ fn get_version() -> &'static str {
 #[tauri::command]
 fn copy_log_to_clipboard() -> Result<usize, String> {
     let tail = applog::read_tail(200).ok_or_else(|| "kein Log gefunden".to_string())?;
-    clipboard::write_clipboard_text(&tail).map_err(|e| format!("{e}"))?;
+    clipboard::write_clipboard_text(&tail).map_err(|e| e.to_string())?;
     Ok(tail.lines().count())
 }
 
@@ -302,6 +302,9 @@ fn main() {
             #[cfg(not(target_os = "macos"))]
             let tray_icon = app.default_window_icon().unwrap().clone();
 
+            // `mut` ist nur auf macOS gebraucht — Clippy/rustc warnt sonst
+            // auf Win/Linux mit `unused_mut`. Conditional-Modifier per cfg-Attr.
+            #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
             let mut tray_builder = TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
                 .icon(tray_icon)

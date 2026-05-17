@@ -27,7 +27,7 @@
 //! Env-Variable (Standard-`env_logger`-Konvention).
 
 use log::{LevelFilter, Log, Metadata, Record};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Seek, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -70,7 +70,7 @@ impl Log for AppLogger {
             if let Some(file) = guard.as_mut() {
                 let _ = file.write_all(line.as_bytes());
                 // Größen-Check und ggf. Rotation
-                if let Ok(pos) = file.seek(SeekFrom::Current(0)) {
+                if let Ok(pos) = file.stream_position() {
                     if pos > MAX_LOG_BYTES {
                         if let Some(path) = &self.path {
                             rotate(path);

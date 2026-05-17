@@ -70,8 +70,7 @@ pub fn make_token(entity_type: char, original: &str, case_secret: &[u8]) -> Stri
 pub fn normalize_for_hashing(s: &str) -> String {
     s.trim()
         .replace('\u{00A0}', " ") // NBSP → space
-        .replace('\u{200B}', "") // Zero-Width-Space entfernen
-        .replace('\u{FEFF}', "") // BOM entfernen
+        .replace(['\u{200B}', '\u{FEFF}'], "") // Zero-Width-Space + BOM entfernen
         .split_whitespace() // Mehrfach-Whitespace kollabieren
         .collect::<Vec<_>>()
         .join(" ")

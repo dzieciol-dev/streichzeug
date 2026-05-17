@@ -134,11 +134,25 @@ fn get_ner_status() -> serde_json::Value {
     let built = cfg!(feature = "ner");
     let cfg = Settings::load();
     let ready = ner::is_ready();
+    let model_files_present = ner::model_files_present();
+    let user_models_dir = ner::user_models_dir().map(|p| p.display().to_string());
     serde_json::json!({
         "built_with_ner_feature": built,
         "enabled": cfg.enable_ner,
         "ready": ready,
+        "model_files_present": model_files_present,
+        "user_models_dir": user_models_dir,
     })
+}
+
+/// Frontend-Command: lädt das NER-Modell zur Laufzeit in den User-Daten-
+/// Pfad. Asynchron, weil's mehrere 100 MB sind. Liefert den Pfad zurück,
+/// in den die Files geschrieben wurden.
+#[tauri::command]
+async fn download_ner_model() -> Result<String, String> {
+    ner::download_models()
+        .await
+        .map(|p| p.display().to_string())
 }
 
 /// Frontend-Command: Settings aktualisieren. Manche Felder erfordern
@@ -231,6 +245,7 @@ fn main() {
             get_settings,
             update_settings,
             get_ner_status,
+            download_ner_model,
             open_log_folder,
             copy_log_to_clipboard,
             get_version,

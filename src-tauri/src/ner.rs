@@ -71,6 +71,45 @@ pub fn is_ready() -> bool {
     inference::is_ready()
 }
 
+/// Prüft, ob die Modell-Files lokal liegen (Status für Onboarding/UI).
+/// Schaut im User-Daten-Verzeichnis nach `model.onnx`. Reine Existenzprüfung,
+/// keine Hash-Verifikation — die übernimmt der Engine-Loader.
+pub fn model_files_present() -> bool {
+    let Some(dir) = user_models_dir() else { return false };
+    dir.join("model.onnx").exists()
+        && dir.join("tokenizer.json").exists()
+        && dir.join("MANIFEST.sha256").exists()
+}
+
+/// Zielverzeichnis für [`download_models`]: `<LOCALAPPDATA>/de.streichzeug.app/models/`.
+/// Macht das Verzeichnis auf Abruf hin sichtbar — der Caller kann's für
+/// User-Feedback nutzen („Modell wird nach … geladen").
+pub fn user_models_dir() -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|d| d.join("de.streichzeug.app").join("models"))
+}
+
+/// Lädt Modell-, Tokenizer- und ONNX-Runtime-Files in den User-Daten-Pfad.
+///
+/// Quelle: HuggingFace + Microsoft GitHub-Releases. Es wird **nichts** im
+/// Bundle mitgeliefert — der User triggert den Download explizit über
+/// das Onboarding oder den UI-Button. Damit ist die App-Distribution
+/// klar nur „Code", die Lizenz-Last für Modell + ORT bleibt beim
+/// Original-Distributor.
+///
+/// Aufruf nur mit aktivem `ner`-Feature sinnvoll — ohne das Feature ist
+/// die Funktion eine kostenpflichtige No-Op-Fehler-Antwort, damit
+/// Frontend-Code denselben Pfad nutzen kann.
+pub async fn download_models() -> Result<std::path::PathBuf, String> {
+    #[cfg(feature = "ner")]
+    {
+        downloader::run().await.map_err(|e| format!("{e:#}"))
+    }
+    #[cfg(not(feature = "ner"))]
+    {
+        Err("NER-Feature ist in diesem Build nicht aktiviert (kompiliere mit --features ner).".to_string())
+    }
+}
+
 // =================================================================== Real Impl (feature = "ner")
 
 #[cfg(feature = "ner")]
@@ -161,7 +200,7 @@ mod inference {
 
         anyhow::ensure!(
             model_path.exists(),
-            "NER model file not found: {} — run scripts/download-ner-model.{{ps1,sh}}",
+            "NER model file not found: {} — bitte erst in der App das NER-Modell herunterladen",
             model_path.display()
         );
         anyhow::ensure!(
@@ -169,6 +208,19 @@ mod inference {
             "NER tokenizer file not found: {}",
             tokenizer_path.display()
         );
+
+        // ORT-Shared-Library zur Laufzeit lokalisieren. `load-dynamic` lädt
+        // die Lib aus dem Pfad in `ORT_DYLIB_PATH`. Wir setzen das vor
+        // `Session::builder()`, damit ort die heruntergeladene Lib aus
+        // dem User-Daten-Pfad findet — nicht ins App-Bundle gepackt.
+        let dylib_path = dylib_path(&models_dir);
+        anyhow::ensure!(
+            dylib_path.exists(),
+            "ORT shared library not found: {} — bitte erst in der App das NER-Modell herunterladen",
+            dylib_path.display()
+        );
+        std::env::set_var("ORT_DYLIB_PATH", &dylib_path);
+        log::info!("ner: ORT_DYLIB_PATH = {}", dylib_path.display());
 
         verify_manifest(&manifest_path, &models_dir)?;
 
@@ -182,6 +234,17 @@ mod inference {
             session: Mutex::new(session),
             tokenizer,
         })
+    }
+
+    /// Plattform-spezifischer Filename der ONNX-Runtime-Shared-Library.
+    fn dylib_path(models_dir: &std::path::Path) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        let name = "libonnxruntime.dylib";
+        #[cfg(target_os = "windows")]
+        let name = "onnxruntime.dll";
+        #[cfg(target_os = "linux")]
+        let name = "libonnxruntime.so";
+        models_dir.join(name)
     }
 
     /// Liest `MANIFEST.sha256` und vergleicht die erwarteten Hashes mit den
@@ -254,34 +317,31 @@ mod inference {
         Ok(())
     }
 
-    /// Sucht das `models/`-Verzeichnis. Mehrere Locations werden in
-    /// dieser Reihenfolge probiert:
+    /// Sucht das `models/`-Verzeichnis. Standard-Pfad (Public-Release) ist
+    /// das User-Daten-Verzeichnis — dorthin lädt [`super::download_models`]
+    /// die Files. Dev-Pfade in `src-tauri/models/` werden als Fallback
+    /// für lokale Entwicklung weiter unterstützt.
     ///
-    /// 1. `<EXE_DIR>/models/` — Win-Production-MSI bündelt direkt neben EXE
-    /// 2. `<EXE_DIR>/../Resources/models/` — macOS-App-Bundle
-    ///    (`Streichzeug.app/Contents/MacOS/streichzeug` →
-    ///    `Streichzeug.app/Contents/Resources/models/`)
-    /// 3. `<LOCALAPPDATA>/de.streichzeug.app/models/` — Beta-Setup
-    ///    in userbeschreibbarem Verzeichnis (auf Win), bzw.
-    ///    `~/Library/Application Support/…` auf macOS
-    /// 4. `<EXE_DIR>/../../models/` — Dev-Build via `cargo build`
+    /// Reihenfolge:
+    /// 1. `<LOCALAPPDATA>/de.streichzeug.app/models/` — der Pfad, in den
+    ///    die App selbst per `download_models` lädt
+    /// 2. `<EXE_DIR>/models/` — Dev-Build, wenn jemand
+    ///    `scripts/download-ner-model.sh` manuell ausgeführt hat
+    /// 3. `<EXE_DIR>/../../models/` — Dev-Build via `cargo build` aus
+    ///    `src-tauri/target/`
     ///
-    /// Erster Treffer mit existierendem `model.onnx` gewinnt. Fehlt's
-    /// überall, liefern wir alle Pfade im Fehler — der User sieht direkt,
-    /// wo er das Modell hinlegen kann.
+    /// Erster Treffer mit existierender `model.onnx` gewinnt.
     fn models_dir() -> anyhow::Result<PathBuf> {
         let exe = std::env::current_exe()?;
         let exe_dir = exe
             .parent()
             .ok_or_else(|| anyhow::anyhow!("no exe parent dir"))?;
 
-        let mut candidates: Vec<PathBuf> = vec![
-            exe_dir.join("models"),
-            exe_dir.join("..").join("Resources").join("models"),
-        ];
+        let mut candidates: Vec<PathBuf> = Vec::new();
         if let Some(local) = dirs::data_local_dir() {
             candidates.push(local.join("de.streichzeug.app").join("models"));
         }
+        candidates.push(exe_dir.join("models"));
         candidates.push(exe_dir.join("..").join("..").join("models"));
 
         for path in &candidates {
@@ -599,5 +659,167 @@ mod tests {
             "NER inference p99 zu hoch: {:?}",
             p99
         );
+    }
+}
+
+// =================================================================== Downloader
+
+/// Holt Modell-, Tokenizer- und ONNX-Runtime-Files zur Laufzeit aus
+/// HuggingFace und Microsoft-GitHub. Ziel ist das User-Daten-Verzeichnis,
+/// **nicht** das App-Bundle — dadurch sind wir nicht der Re-Distributor
+/// der Modell-Files (Davlan/AFL-3.0 + MS-ORT/MIT).
+///
+/// Aktiv nur mit `--features ner`. Ohne Feature ist die Funktion gar
+/// nicht kompiliert; der Aufruf landet im No-Op-Fehler in `download_models`.
+#[cfg(feature = "ner")]
+mod downloader {
+    use anyhow::{Context, Result};
+    use futures_util::StreamExt;
+    use sha2::{Digest, Sha256};
+    use std::path::PathBuf;
+    use tokio::io::AsyncWriteExt;
+
+    const MODEL_URL: &str = "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/main/onnx/model_quantized.onnx";
+    const TOKENIZER_URL: &str = "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/main/tokenizer.json";
+    fn ort_asset_url() -> &'static str {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz";
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-x86_64-1.22.0.tgz";
+        #[cfg(target_os = "windows")]
+        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip";
+        #[cfg(target_os = "linux")]
+        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz";
+    }
+
+    /// Filename der ORT-Shared-Library für die aktuelle Plattform.
+    fn ort_lib_name() -> &'static str {
+        #[cfg(target_os = "macos")]
+        return "libonnxruntime.dylib";
+        #[cfg(target_os = "windows")]
+        return "onnxruntime.dll";
+        #[cfg(target_os = "linux")]
+        return "libonnxruntime.so";
+    }
+
+    pub(super) async fn run() -> Result<PathBuf> {
+        let dir = super::user_models_dir()
+            .ok_or_else(|| anyhow::anyhow!("kein User-Daten-Verzeichnis verfügbar"))?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .with_context(|| format!("create_dir_all {}", dir.display()))?;
+
+        log::info!("ner download: starting into {}", dir.display());
+
+        let client = reqwest::Client::builder()
+            .user_agent(concat!("streichzeug/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .context("reqwest client init")?;
+
+        // 1. Modell-Datei (~145 MB)
+        log::info!("ner download: model.onnx ({})", MODEL_URL);
+        download_to_file(&client, MODEL_URL, &dir.join("model.onnx")).await?;
+
+        // 2. Tokenizer
+        log::info!("ner download: tokenizer.json ({})", TOKENIZER_URL);
+        download_to_file(&client, TOKENIZER_URL, &dir.join("tokenizer.json")).await?;
+
+        // 3. ORT-Shared-Library — entpacke aus .tgz/.zip
+        let ort_url = ort_asset_url();
+        log::info!("ner download: ORT runtime ({})", ort_url);
+        let archive_path = dir.join("ort_archive.bin");
+        download_to_file(&client, ort_url, &archive_path).await?;
+        extract_ort_lib(&archive_path, &dir.join(ort_lib_name()))?;
+        let _ = tokio::fs::remove_file(&archive_path).await;
+
+        // 4. MANIFEST.sha256 erzeugen
+        write_manifest(&dir)?;
+
+        log::info!("ner download: complete → {}", dir.display());
+        Ok(dir)
+    }
+
+    /// Streamt eine HTTP-Response in eine Datei. `tokio::fs::File` +
+    /// `reqwest::Response::bytes_stream` halten den Speicher klein
+    /// (Chunk-für-Chunk statt voller Body im RAM).
+    async fn download_to_file(
+        client: &reqwest::Client,
+        url: &str,
+        path: &std::path::Path,
+    ) -> Result<()> {
+        let resp = client
+            .get(url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .error_for_status()
+            .with_context(|| format!("HTTP-Status für {url}"))?;
+        let mut file = tokio::fs::File::create(path)
+            .await
+            .with_context(|| format!("create {}", path.display()))?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("stream {url}"))?;
+            file.write_all(&chunk)
+                .await
+                .with_context(|| format!("write {}", path.display()))?;
+        }
+        file.flush().await?;
+        Ok(())
+    }
+
+    /// Entpackt die ORT-Shared-Library aus dem heruntergeladenen Archive.
+    /// macOS/Linux: .tgz mit tar+gzip. Windows: .zip — aktuell nicht
+    /// vollständig implementiert, weil das `zip`-Crate eine zusätzliche
+    /// Abhängigkeit wäre. Fallback dort: User muss die DLL manuell
+    /// in den User-Daten-Pfad legen (Hinweis im Fehler).
+    fn extract_ort_lib(archive: &std::path::Path, target: &std::path::Path) -> Result<()> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let file = std::fs::File::open(archive)
+                .with_context(|| format!("open archive {}", archive.display()))?;
+            let gz = flate2::read::GzDecoder::new(file);
+            let mut tar = tar::Archive::new(gz);
+            for entry in tar.entries()? {
+                let mut entry = entry?;
+                let path = entry.path()?.into_owned();
+                if path.file_name().and_then(|n| n.to_str()) == Some(ort_lib_name()) {
+                    entry.unpack(target)?;
+                    log::info!("ner download: extracted {}", target.display());
+                    return Ok(());
+                }
+            }
+            anyhow::bail!("ORT-Shared-Library nicht in Archive gefunden");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            anyhow::bail!(
+                "Win-Auto-Extract noch nicht implementiert — bitte onnxruntime.dll manuell aus \
+                 {} entpacken und nach {} kopieren",
+                archive.display(),
+                target.display()
+            );
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            anyhow::bail!("Plattform nicht unterstützt für ORT-Auto-Extract")
+        }
+    }
+
+    fn write_manifest(dir: &std::path::Path) -> Result<()> {
+        use std::io::Write;
+        let mut content = String::new();
+        content.push_str("# Auto-generated by Streichzeug ner::downloader.\n");
+        content.push_str("# Format: <sha256-hex>  <relative-path>\n");
+        for name in ["model.onnx", "tokenizer.json"] {
+            let path = dir.join(name);
+            let bytes = std::fs::read(&path)
+                .with_context(|| format!("read {} for manifest", path.display()))?;
+            let hash = hex::encode(Sha256::digest(&bytes));
+            content.push_str(&format!("{hash}  {name}\n"));
+        }
+        let mut file = std::fs::File::create(dir.join("MANIFEST.sha256"))?;
+        file.write_all(content.as_bytes())?;
+        Ok(())
     }
 }

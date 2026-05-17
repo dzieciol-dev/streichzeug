@@ -1,0 +1,84 @@
+name: Release
+
+# Trigger:
+# - Push eines Tags wie `v0.5.0` oder `v1.2.3` → baut Mac DMG + Win MSI
+#   und hängt sie an einen GitHub-Release.
+# - Manuell via Actions-UI (workflow_dispatch).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  # Wir brauchen `contents: write`, damit der tauri-action ein Release
+  # anlegen + Assets hochladen kann.
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: "--target aarch64-apple-darwin"
+          - platform: macos-13          # Intel Mac Runner
+            args: "--target x86_64-apple-darwin"
+          - platform: windows-latest
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # `targets` für die jeweilige Plattform-Architektur
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || matrix.platform == 'macos-13' && 'x86_64-apple-darwin' || '' }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: release-${{ matrix.platform }}
+
+      - name: Install frontend deps
+        run: npm ci
+
+      # NER-Feature aktivieren — Modell wird zur Laufzeit nachgeladen,
+      # nicht im Bundle. `tauri.conf.json` deklariert keine Modell-
+      # Resources mehr (siehe Public-Repo Release-Notes), daher braucht
+      # die CI keine Placeholder-Files.
+      - name: Build app (with NER feature)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "Streichzeug ${{ github.ref_name }}"
+          releaseBody: |
+            ## Streichzeug ${{ github.ref_name }}
+
+            **macOS (Apple Silicon)**: Streichzeug_*_aarch64.dmg
+            **macOS (Intel)**: Streichzeug_*_x64.dmg
+            **Windows**: Streichzeug_*_x64-setup.exe oder Streichzeug_*_x64_en-US.msi
+
+            Beim ersten Aktivieren der „Erweiterten Erkennung" lädt
+            die App das NER-Modell (~145 MB) direkt von HuggingFace
+            herunter — kein Modell ist im Bundle enthalten.
+
+            macOS-User: nach dem ersten Hotkey-Druck nach Accessibility-
+            Permission fragt — siehe README.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }} --features ner

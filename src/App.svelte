@@ -10,6 +10,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import Onboarding from "./Onboarding.svelte";
 
   type Settings = {
     hotkey: string;
@@ -18,9 +19,16 @@
     enable_notifications: boolean;
     retention_minutes: number;
     strict_mode: boolean;
+    onboarded: boolean;
   };
   type StorageStatus = { mapping_count: number; retention_minutes: number };
-  type NerStatus = { built_with_ner_feature: boolean; enabled: boolean; ready: boolean };
+  type NerStatus = {
+    built_with_ner_feature: boolean;
+    enabled: boolean;
+    ready: boolean;
+    model_files_present: boolean;
+    user_models_dir: string | null;
+  };
 
   let settings: Settings = {
     hotkey: "CmdOrCtrl+Alt+B",
@@ -28,10 +36,18 @@
     enable_ner: false,
     enable_notifications: false,
     retention_minutes: 60,
-    strict_mode: false
+    strict_mode: false,
+    onboarded: false
   };
   let storageStatus: StorageStatus = { mapping_count: 0, retention_minutes: 60 };
   let purgeStatus = "";
+  let initialized = false;
+
+  // Onboarding-Done-Handler: nochmal alle Settings laden, dann Wizard ausblenden
+  async function onOnboardingDone() {
+    await loadAll();
+    settings = { ...settings, onboarded: true };
+  }
 
   const RETENTION_OPTIONS = [
     { value: 15, label: "15 Minuten — maximaler DSGVO-Schutz" },
@@ -40,7 +56,13 @@
     { value: 1440, label: "24 Stunden — bequem, weniger streng" },
     { value: 0, label: "Nur diese Session — Mappings nach App-Quit weg" }
   ];
-  let nerStatus: NerStatus = { built_with_ner_feature: false, enabled: false, ready: false };
+  let nerStatus: NerStatus = {
+    built_with_ner_feature: false,
+    enabled: false,
+    ready: false,
+    model_files_present: false,
+    user_models_dir: null
+  };
 
   async function loadAll() {
     try {
@@ -197,8 +219,9 @@
       .replace(/\+/g, " + ");
   }
 
-  onMount(() => {
-    loadAll();
+  onMount(async () => {
+    await loadAll();
+    initialized = true;
     // Bei jedem erneuten Window-Öffnen den Status frisch ziehen — nach
     // Tray-Toggle hat sich evtl. enable_ner geändert.
     document.addEventListener("visibilitychange", () => {
@@ -207,6 +230,9 @@
   });
 </script>
 
+{#if initialized && !settings.onboarded}
+  <Onboarding initialSettings={settings} nerStatus={nerStatus} on:done={onOnboardingDone} />
+{:else}
 <main>
   <header>
     <h1>Streichzeug <span class="badge">Beta v{appVersion}</span></h1>
@@ -434,6 +460,7 @@
     </p>
   </footer>
 </main>
+{/if}
 
 <style>
   main { max-width: 720px; margin: 0 auto; padding: 24px; }

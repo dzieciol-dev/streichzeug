@@ -32,17 +32,8 @@
     "longDescription": "Erkennt personenbezogene Daten beim Kopieren und ersetzt sie durch reversible Pseudonyme, bevor sie an LLMs wie ChatGPT oder Claude gepastet werden.",
     "publisher": "Streichzeug Contributors",
     "copyright": "Copyright (c) 2026 The Streichzeug Authors",
-    "resources": {
-      "models/model.onnx": "models/model.onnx",
-      "models/tokenizer.json": "models/tokenizer.json",
-      "models/MANIFEST.sha256": "models/MANIFEST.sha256",
-      "models/onnxruntime.dll": "./onnxruntime.dll"
-    },
     "macOS": {
-      "minimumSystemVersion": "11.0",
-      "files": {
-        "MacOS/libonnxruntime.dylib": "models/libonnxruntime.dylib"
-      }
+      "minimumSystemVersion": "11.0"
     }
   }
 }

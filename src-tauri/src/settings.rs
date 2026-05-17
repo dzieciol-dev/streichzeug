@@ -89,6 +89,18 @@ pub struct Settings {
     /// Default off (= reversibler Modus).
     #[serde(default)]
     pub strict_mode: bool,
+
+    /// First-Run-Onboarding bereits durchgelaufen?
+    ///
+    /// Default `false` → beim ersten App-Start zeigt das Frontend einen
+    /// Wizard, der Hotkey, Modus, Retention, NER-Download und Permissions
+    /// abfragt. Nach Abschluss wird das Flag auf `true` gesetzt und der
+    /// Wizard erscheint nicht mehr.
+    ///
+    /// Wer den Wizard wieder sehen will: Settings-File löschen oder
+    /// dieses Feld manuell auf `false` setzen.
+    #[serde(default)]
+    pub onboarded: bool,
 }
 
 fn default_retention_minutes() -> u32 {
@@ -111,6 +123,7 @@ impl Default for Settings {
             enable_notifications: false,
             retention_minutes: 60,
             strict_mode: false,
+            onboarded: false,
         }
     }
 }

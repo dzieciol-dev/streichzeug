@@ -47,7 +47,7 @@ jobs:
           npm ci
           npm run build
 
-- name: Create NER placeholder files (Tauri-Resource-Check)
+      - name: Create NER placeholder files (Tauri-Resource-Check)
         run: |
           mkdir -p src-tauri/models
           touch src-tauri/models/model.onnx
@@ -94,7 +94,7 @@ jobs:
           npm ci
           npm run build
 
-- name: Create NER placeholder files (Tauri-Resource-Check)
+      - name: Create NER placeholder files (Tauri-Resource-Check)
         run: |
           mkdir -p src-tauri/models
           touch src-tauri/models/model.onnx
@@ -146,7 +146,7 @@ jobs:
           npm ci
           npm run build
 
-- name: Create NER placeholder files (Tauri-Resource-Check)
+      - name: Create NER placeholder files (Tauri-Resource-Check)
         run: |
           mkdir -p src-tauri/models
           touch src-tauri/models/model.onnx

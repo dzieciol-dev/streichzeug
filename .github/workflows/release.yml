@@ -69,16 +69,39 @@ jobs:
           releaseBody: |
             ## Streichzeug ${{ github.ref_name }}
 
-            **macOS (Apple Silicon)**: Streichzeug_*_aarch64.dmg
-            **macOS (Intel)**: Streichzeug_*_x64.dmg
-            **Windows**: Streichzeug_*_x64-setup.exe oder Streichzeug_*_x64_en-US.msi
+            ### Download
+
+            - **macOS Apple Silicon (M1/M2/M3/M4)**: `Streichzeug_*_aarch64.dmg`
+            - **macOS Intel**: `Streichzeug_*_x64.dmg`
+            - **Windows 10/11**: `Streichzeug_*_x64-setup.exe` oder `Streichzeug_*_x64_en-US.msi`
+
+            ### ⚠️ macOS: „App ist beschädigt"-Fehler
+
+            Die Bundles sind aktuell **nicht** Apple-Developer-signiert
+            (kein Apple Developer Account). Beim ersten Start blockt macOS
+            das DMG mit einer Quarantäne-Meldung. Behebung:
+
+            ```bash
+            xattr -dr com.apple.quarantine /Applications/Streichzeug.app
+            ```
+
+            Danach App über Launchpad oder Finder starten — der Hinweis
+            bleibt aus. Sobald wir Code-Signing eingerichtet haben, ist
+            der Schritt nicht mehr nötig.
+
+            ### NER-Modell
 
             Beim ersten Aktivieren der „Erweiterten Erkennung" lädt
             die App das NER-Modell (~145 MB) direkt von HuggingFace
-            herunter — kein Modell ist im Bundle enthalten.
+            herunter. **Kein Modell ist im Bundle enthalten** — die
+            App ist deutlich schlanker als die Beta-Versionen.
 
-            macOS-User: nach dem ersten Hotkey-Druck nach Accessibility-
-            Permission fragt — siehe README.
+            ### macOS-Permissions
+
+            Beim ersten Hotkey-Druck fragt macOS nach Accessibility-
+            Permission (für das synthetische Cmd+V). Systemeinstellungen
+            → Datenschutz & Sicherheit → Bedienungshilfen → Streichzeug
+            aktivieren.
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }} --features ner

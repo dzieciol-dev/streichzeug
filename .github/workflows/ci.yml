@@ -47,6 +47,14 @@ jobs:
           npm ci
           npm run build
 
+- name: Create NER placeholder files (Tauri-Resource-Check)
+        run: |
+          mkdir -p src-tauri/models
+          touch src-tauri/models/model.onnx
+          touch src-tauri/models/tokenizer.json
+          touch src-tauri/models/MANIFEST.sha256
+          touch src-tauri/models/onnxruntime.dll
+
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
@@ -57,7 +65,7 @@ jobs:
 
       - name: cargo test (--locked = Cargo.lock muss aktuell sein)
         working-directory: src-tauri
-        run: cargo test --bin clipboard-pii --locked
+        run: cargo test --bin streichzeug --locked
 
   # ===================================================================
   # Clippy — strenger Lint-Modus. Findet idiomatische und Korrektheits-Issues.
@@ -86,6 +94,14 @@ jobs:
           npm ci
           npm run build
 
+- name: Create NER placeholder files (Tauri-Resource-Check)
+        run: |
+          mkdir -p src-tauri/models
+          touch src-tauri/models/model.onnx
+          touch src-tauri/models/tokenizer.json
+          touch src-tauri/models/MANIFEST.sha256
+          touch src-tauri/models/onnxruntime.dll
+
       - name: Install Rust toolchain with clippy
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -98,7 +114,7 @@ jobs:
 
       - name: cargo clippy
         working-directory: src-tauri
-        run: cargo clippy --bin clipboard-pii --locked -- -D warnings
+        run: cargo clippy --bin streichzeug --locked -- -D warnings
 
   # ===================================================================
   # NER-Feature — kompiliert die Binary mit `--features ner`. Wir laden
@@ -130,6 +146,14 @@ jobs:
           npm ci
           npm run build
 
+- name: Create NER placeholder files (Tauri-Resource-Check)
+        run: |
+          mkdir -p src-tauri/models
+          touch src-tauri/models/model.onnx
+          touch src-tauri/models/tokenizer.json
+          touch src-tauri/models/MANIFEST.sha256
+          touch src-tauri/models/onnxruntime.dll
+
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
@@ -143,11 +167,11 @@ jobs:
 
       - name: cargo check --features ner
         working-directory: src-tauri
-        run: cargo check --bin clipboard-pii --features ner --locked
+        run: cargo check --bin streichzeug --features ner --locked
 
       - name: cargo clippy --features ner
         working-directory: src-tauri
-        run: cargo clippy --bin clipboard-pii --features ner --locked -- -D warnings
+        run: cargo clippy --bin streichzeug --features ner --locked -- -D warnings
 
   # ===================================================================
   # cargo-audit — bekannte Vulnerabilities (RUSTSEC-Advisories) im

@@ -57,7 +57,7 @@ für PII-Erkennung und -Pseudonymisierung in der Zwischenablage.
 
 ## Konventionen für Bug-Reports
 
-Bei Problemen bitte ein [GitHub-Issue](https://github.com/lurning/streichzeug/issues)
+Bei Problemen bitte ein [GitHub-Issue](https://github.com/dzieciol-dev/streichzeug/issues)
 eröffnen mit:
 
 - **Version** (aus dem Header-Badge im App-Fenster)

@@ -422,15 +422,15 @@
       <p class="hint" style="margin-top: 8px;">{logCopyStatus}</p>
     {/if}
     <p class="hint">
-      Dann ein <a href="https://github.com/lurning/streichzeug/issues/new" target="_blank" rel="noopener">GitHub-Issue eröffnen</a>,
+      Dann ein <a href="https://github.com/dzieciol-dev/streichzeug/issues/new" target="_blank" rel="noopener">GitHub-Issue eröffnen</a>,
       Log einfügen, kurz beschreiben was nicht geklappt hat, abschicken.
     </p>
   </section>
 
   <footer>
     <p>
-      Open Source unter AGPL-3.0. Bug-Reports und Feature-Requests:
-      <a href="https://github.com/lurning/streichzeug/issues" target="_blank" rel="noopener">github.com/lurning/streichzeug/issues</a>.
+      Open Source unter MIT OR Apache-2.0. Bug-Reports und Feature-Requests:
+      <a href="https://github.com/dzieciol-dev/streichzeug/issues" target="_blank" rel="noopener">github.com/dzieciol-dev/streichzeug/issues</a>.
     </p>
   </footer>
 </main>

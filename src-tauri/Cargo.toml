@@ -4,8 +4,8 @@ version = "0.5.0"
 description = "Streichzeug — PII-Erkennung und Pseudonymisierung in der Zwischenablage"
 edition = "2021"
 rust-version = "1.77"
-license = "AGPL-3.0-only"
-repository = "https://github.com/lurning/streichzeug"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dzieciol-dev/streichzeug"
 authors = ["Streichzeug Contributors"]
 # Verhindert versehentliches `cargo publish` zu crates.io — das Paket ist
 # Teil einer Desktop-App, nicht als Bibliothek zur Wiederverwendung gedacht.

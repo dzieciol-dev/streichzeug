@@ -140,4 +140,4 @@ gegen Files.
 - Davlan-Original-Modell: Apache-2.0 (siehe HF-Model-Card)
 - Xenova-ONNX-Konvertierung: erbt Apache-2.0
 - ONNX Runtime: MIT
-- Alle drei AGPL-3.0-kompatibel für den späteren Open-Core-Release
+- Alle drei kompatibel mit der Streichzeug-Lizenz (MIT OR Apache-2.0)

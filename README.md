@@ -4,7 +4,7 @@
 > erkennt und durch Pseudonyme ersetzt — bevor du sie in einen LLM-Chat
 > (ChatGPT, Claude, Gemini, Copilot, …) pastest.
 
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT_OR_Apache--2.0-blue.svg)](#lizenz)
 
 ```
                   Original-Text                          Pseudonymisiert
@@ -119,7 +119,7 @@ brew install node
 xcode-select --install
 cargo install tauri-cli --version "^2.0"
 
-git clone https://github.com/lurning/streichzeug.git
+git clone https://github.com/dzieciol-dev/streichzeug.git
 cd streichzeug
 npm install
 cargo tauri dev
@@ -143,7 +143,7 @@ cargo install tauri-cli --version "^2.0"
 winget install OpenJS.NodeJS.LTS
 winget install Microsoft.VisualStudio.2022.BuildTools
 
-git clone https://github.com/lurning/streichzeug.git
+git clone https://github.com/dzieciol-dev/streichzeug.git
 cd streichzeug
 npm install
 cargo tauri dev
@@ -209,7 +209,7 @@ cargo fmt
 ```
 
 Bug-Reports und Feature-Requests:
-https://github.com/lurning/streichzeug/issues
+https://github.com/dzieciol-dev/streichzeug/issues
 
 Sicherheits-Findings: siehe **[`SECURITY.md`](SECURITY.md)**.
 
@@ -217,7 +217,29 @@ Sicherheits-Findings: siehe **[`SECURITY.md`](SECURITY.md)**.
 
 ## Lizenz
 
-[AGPL-3.0-only](LICENSE). Volltext in [`LICENSE`](LICENSE).
+**Dual-lizenziert unter `MIT` ODER `Apache-2.0` — du wählst.**
+Das ist der Rust-Ökosystem-Standard.
 
-Wer den Code in einer eigenen Anwendung (auch SaaS / Cloud-Service)
-verwendet, muss seine Anpassungen unter derselben Lizenz veröffentlichen.
+- [`LICENSE-MIT`](LICENSE-MIT) — minimal, „behalte den Hinweis bei"
+- [`LICENSE-APACHE`](LICENSE-APACHE) — wie MIT, plus expliziter Patent-Grant
+  für mehr Enterprise-Use-Trust
+
+Beide Lizenzen sind permissiv: nimm den Code, baue darauf auf, ob für
+private, kommerzielle oder Open-Source-Projekte — egal. Wir bestehen
+nur darauf, dass die Copyright-Notice und die jeweilige Lizenz erhalten
+bleiben (sofern aus rechtlicher Sicht überhaupt eine Notice nötig ist).
+
+### Hinweis zu KI-generiertem Code
+
+Teile dieser Codebase wurden mithilfe von KI-Coding-Assistenten erzeugt.
+Da die urheberrechtliche Schöpfungshöhe rein KI-generierter Werke in
+mehreren Jurisdiktionen (insbesondere DE/EU) ungeklärt bzw. eher
+verneint wird, treffen wir keine Aussage darüber, **welcher Teil dieses
+Repos eigentum-fähig ist und welcher nicht**. Permissive Lizenzen wie
+MIT/Apache-2.0 funktionieren trotzdem — sie geben dir alle Rechte, die
+wir geben können, und mehr als das geht ohnehin nicht.
+
+### Beitragen
+
+Beiträge unterliegen automatisch denselben beiden Lizenzen (siehe
+[`CONTRIBUTING.md`](CONTRIBUTING.md) — Rust-Standard-Klausel).

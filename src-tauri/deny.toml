@@ -45,9 +45,15 @@ ignore = [
 # erlaubt werden.
 [licenses]
 confidence-threshold = 0.85
+# Ungenutzte allow-Einträge (z. B. "WTFPL", "Unicode-DFS-2016") sind
+# erwartet: wir whitelisten defensiv für Transitive-Deps, deren Lizenzen
+# zwischen Updates wechseln können. Default-Verhalten (warn) bricht
+# CI, ist aber funktional irrelevant.
+unused-allowed-license = "allow"
 # Private packages (publish = false) sind von der License-Whitelist
-# ausgenommen — unser eigenes `clipboard-pii` ist private und commitet
-# noch nicht zu einer SPDX-Lizenz (geplant: AGPL-3.0 für den Core).
+# ausgenommen — unser eigenes `streichzeug` ist dual-lizenziert unter
+# `MIT OR Apache-2.0` (im Cargo.toml-License-Field deklariert), aber als
+# `publish = false` markiert und damit für deny.toml ein „private package".
 private = { ignore = true }
 allow = [
     "MIT",

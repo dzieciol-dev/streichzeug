@@ -5,13 +5,28 @@ Vielen Dank, dass du beitragen willst.
 Streichzeug ist ein lokales Privacy-Tool — Code-Qualität, Privacy-by-Design
 und reproduzierbare Builds sind uns wichtiger als Feature-Velocity.
 
+## Lizenz für Beiträge
+
+Streichzeug ist dual-lizenziert unter **`MIT` ODER `Apache-2.0`** (Rust-
+Ökosystem-Standard, siehe Lizenz-Sektion im [`README.md`](README.md)).
+
+Wenn du einen PR einreichst, gilt automatisch der Rust-Standard-Wortlaut:
+
+> Unless you explicitly state otherwise, any contribution intentionally
+> submitted for inclusion in the work by you, as defined in the
+> Apache-2.0 license, shall be dual licensed as above, without any
+> additional terms or conditions.
+
+Das heißt: dein Beitrag wird ebenfalls unter `MIT OR Apache-2.0`
+lizenziert. Ein separates Contributor License Agreement (CLA) gibt es
+nicht.
+
 ## Developer Certificate of Origin (DCO)
 
-Wir benutzen das [Developer Certificate of Origin](https://developercertificate.org/)
-(DCO) anstelle eines Contributor License Agreement. Das heißt: jeder
-Commit, den du beisteuerst, muss mit `Signed-off-by: Dein Name <deine@email>`
-versehen sein. Damit bestätigst du, dass du das Recht hast, den Code unter
-unsere Lizenz (AGPL-3.0) beizusteuern.
+Zusätzlich verlangen wir DCO-Sign-Off auf jedem Commit. Damit
+bestätigst du nach [developercertificate.org](https://developercertificate.org/),
+dass du das Recht hast, den Code beizusteuern (z. B. weil du ihn selbst
+geschrieben hast und kein Arbeitsvertrag im Wege steht).
 
 Praktisch reicht ein `-s`-Flag bei `git commit`:
 
@@ -96,7 +111,7 @@ der Wunschliste.
 ## Diskussion vor großen Änderungen
 
 Bei größeren Änderungen (neues Modul, Architektur-Wechsel, neue
-Dependency) bitte vorher ein [GitHub-Issue](https://github.com/lurning/streichzeug/issues/new)
+Dependency) bitte vorher ein [GitHub-Issue](https://github.com/dzieciol-dev/streichzeug/issues/new)
 mit dem Vorschlag eröffnen — sonst riskierst du, an etwas zu arbeiten,
 was wir aus Gründen nicht aufnehmen wollen.
 

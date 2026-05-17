@@ -5,7 +5,7 @@
 Bitte **keine öffentlichen GitHub-Issues** für Sicherheitslücken anlegen.
 
 Sicherheits-Findings bitte über
-[GitHub Private Security Advisories](https://github.com/lurning/streichzeug/security/advisories/new)
+[GitHub Private Security Advisories](https://github.com/dzieciol-dev/streichzeug/security/advisories/new)
 melden. Das ist der vertrauliche Kanal für Coordinated Disclosure auf
 GitHub — wir bekommen die Meldung, du behältst die Kontrolle über die
 Offenlegung.

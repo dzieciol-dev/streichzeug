@@ -1,0 +1,224 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Wöchentlich Montag früh — fängt neu veröffentlichte Advisories ab,
+    # die seit dem letzten Push relevant geworden sind.
+    - cron: "0 6 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings als Errors — fängt unbeabsichtigtes Dead-Code und Lints früh.
+  RUSTFLAGS: "-D warnings"
+
+# Nur ein CI-Lauf pro Branch — Cancellation beim Re-Push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===================================================================
+  # Tests — auf den Zielplattformen Win + Mac. Linux nur als Bonus-Build.
+  # Frontend wird vorher gebaut, weil Tauri's `generate_context!`-Macro
+  # zur Compile-Zeit den `frontendDist`-Pfad (`../dist`) validiert.
+  # ===================================================================
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install frontend deps + build (für Tauri-frontendDist-Validation)
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo test (--locked = Cargo.lock muss aktuell sein)
+        working-directory: src-tauri
+        run: cargo test --bin clipboard-pii --locked
+
+  # ===================================================================
+  # Clippy — strenger Lint-Modus. Findet idiomatische und Korrektheits-Issues.
+  # ===================================================================
+  lint:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps for Tauri build
+        # Tauri 2.x braucht webkit2gtk + libsoup für den Build, auch wenn
+        # wir die GUI nicht ausführen.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Build frontend (für Tauri's compile-time frontendDist-Check)
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Rust toolchain with clippy
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --bin clipboard-pii --locked -- -D warnings
+
+  # ===================================================================
+  # NER-Feature — kompiliert die Binary mit `--features ner`. Wir laden
+  # KEIN Modell herunter (~70 MB) und auch keine ONNX-Runtime — der Job
+  # garantiert nur, dass die Feature-Gate-Pfade kompilieren und die
+  # `ort`/`tokenizers`/`ndarray`-Integration nicht durch fremde Updates
+  # bricht. Tests laufen wir hier nicht, weil sie ohne Modell sowieso
+  # No-Op-Skips wären.
+  # ===================================================================
+  ner-feature-build:
+    name: Build (--features ner)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps for Tauri build
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Build frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          # Eigener Cache-Key, weil Feature-Set die kompilierten Artefakte
+          # ändert — sonst hätten wir Cache-Pollution gegen den default-Job.
+          key: "ner"
+
+      - name: cargo check --features ner
+        working-directory: src-tauri
+        run: cargo check --bin clipboard-pii --features ner --locked
+
+      - name: cargo clippy --features ner
+        working-directory: src-tauri
+        run: cargo clippy --bin clipboard-pii --features ner --locked -- -D warnings
+
+  # ===================================================================
+  # cargo-audit — bekannte Vulnerabilities (RUSTSEC-Advisories) im
+  # gesamten Dep-Tree. Schlägt CI rot bei jedem offenen CVE.
+  #
+  # `rustsec/audit-check@v2` sucht Cargo.lock im Repo-Root; bei uns liegt
+  # die Datei in src-tauri/. Wir installieren cargo-audit manuell und
+  # rufen es mit dem passenden Manifest-Pfad auf.
+  #
+  # Wir wenden dieselbe Ignore-Liste an wie cargo-deny — sonst hätten wir
+  # zwei separate Tools, die unterschiedliche Findings reporten.
+  # ===================================================================
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Run cargo audit (mit den Tauri-Transitive-Ignores)
+        working-directory: src-tauri
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2023-0089 \
+            --ignore RUSTSEC-2024-0370 \
+            --ignore RUSTSEC-2024-0411 \
+            --ignore RUSTSEC-2024-0412 \
+            --ignore RUSTSEC-2024-0413 \
+            --ignore RUSTSEC-2024-0414 \
+            --ignore RUSTSEC-2024-0415 \
+            --ignore RUSTSEC-2024-0416 \
+            --ignore RUSTSEC-2024-0417 \
+            --ignore RUSTSEC-2024-0418 \
+            --ignore RUSTSEC-2024-0419 \
+            --ignore RUSTSEC-2024-0420 \
+            --ignore RUSTSEC-2025-0075 \
+            --ignore RUSTSEC-2025-0080 \
+            --ignore RUSTSEC-2025-0081 \
+            --ignore RUSTSEC-2025-0098 \
+            --ignore RUSTSEC-2025-0100
+
+  # ===================================================================
+  # cargo-deny — License-Whitelist, Banned-Crates, Doppel-Versions-Check.
+  # Konfiguration in deny.toml.
+  # ===================================================================
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: src-tauri/Cargo.toml
+          # Default-Checks: advisories, bans, licenses, sources.
+
+  # ===================================================================
+  # npm audit — npm-Side-Vulnerabilities im Frontend-Dep-Tree.
+  # ===================================================================
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - name: npm audit (high+ only — moderate sind oft in Build-Tools)
+        run: npm audit --audit-level=high

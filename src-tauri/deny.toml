@@ -73,6 +73,9 @@ allow = [
     "WTFPL",
     "Unlicense",
     "0BSD",
+    # Linux Foundation Community Data License — permissive, kompatibel
+    # mit MIT/Apache. Wird von `webpki-roots` (via reqwest/rustls) genutzt.
+    "CDLA-Permissive-2.0",
 ]
 exceptions = [
     # CDDL-1.0 ist in einigen tauri-internen Code-Pfaden enthalten — passt

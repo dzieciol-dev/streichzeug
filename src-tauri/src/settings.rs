@@ -208,6 +208,7 @@ mod tests {
             enable_notifications: true,
             retention_minutes: 15,
             strict_mode: true,
+            onboarded: true,
         };
         let json = serde_json::to_string(&s).unwrap();
         let s2: Settings = serde_json::from_str(&json).unwrap();

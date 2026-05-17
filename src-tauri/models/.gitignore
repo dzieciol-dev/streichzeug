@@ -1,0 +1,10 @@
+# Modell- und Runtime-Dateien werden NICHT eingecheckt — sind ~80 MB
+# und werden zur Laufzeit per Script bezogen (siehe README.md).
+*.onnx
+*.json
+*.dll
+*.dylib
+*.so
+# README.md und diese .gitignore selbst dürfen rein.
+!README.md
+!.gitignore

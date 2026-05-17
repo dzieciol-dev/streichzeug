@@ -1,0 +1,25 @@
+# Normalisiere Zeilenenden zwischen Windows und macOS:
+# Repo speichert LF, Working-Copy übersetzt je nach Plattform.
+
+* text=auto eol=lf
+
+# Windows-Skripte müssen CRLF behalten, sonst funktionieren sie nicht.
+*.bat   text eol=crlf
+*.ps1   text eol=crlf
+
+# Unix-Skripte: LF erzwingen.
+*.sh    text eol=lf
+
+# Binärdateien explizit markieren (kein Diff, keine Konvertierung).
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.icns  binary
+*.onnx  binary
+*.msi   binary
+*.dmg   binary
+*.exe   binary
+*.dll   binary
+*.dylib binary
+*.so    binary

@@ -1,0 +1,95 @@
+# cargo-deny configuration — supply-chain security gates.
+# Run locally with: cargo deny --manifest-path src-tauri/Cargo.toml check
+# Documentation: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# =================================================================== Advisories
+# Bekannte CVEs / Vulnerability-Advisories aus der RUSTSEC-DB.
+#
+# Wir ignorieren explizit eine Liste von Advisories, die alle aus dem
+# transitiven Dep-Tree von Tauri 2.x stammen — wir können sie nicht beheben,
+# ohne Tauri zu forken. Praktisch sind das durchweg „unmaintained"-Markierungen,
+# nicht aktiv ausgenutzte CVEs. Beim nächsten Tauri-Major-Update prüfen,
+# welche IDs verschwinden, und die Liste pflegen.
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = [
+    "RUSTSEC-2023-0089", # atty (sound issues, unmaintained, in Tauri's tree)
+    "RUSTSEC-2024-0370", # proc-macro-error (unmaintained)
+    "RUSTSEC-2024-0411", # atk (deprecated GTK binding via Tauri linux deps)
+    "RUSTSEC-2024-0412", # atk-sys (deprecated GTK binding)
+    "RUSTSEC-2024-0413", # cairo-rs (deprecated GTK binding)
+    "RUSTSEC-2024-0414", # gdk (deprecated GTK binding)
+    "RUSTSEC-2024-0415", # gdk-pixbuf (deprecated GTK binding)
+    "RUSTSEC-2024-0416", # gdk-sys (deprecated GTK binding)
+    "RUSTSEC-2024-0417", # gdkwayland-sys (deprecated GTK binding)
+    "RUSTSEC-2024-0418", # gdkx11-sys (deprecated GTK binding)
+    "RUSTSEC-2024-0419", # gio (deprecated GTK binding)
+    "RUSTSEC-2024-0420", # glib-sys / gio-sys (deprecated GTK binding)
+    "RUSTSEC-2025-0075", # paste-Family unmaintained
+    "RUSTSEC-2025-0080", # derivative unmaintained
+    "RUSTSEC-2025-0081", # instant unmaintained
+    "RUSTSEC-2025-0098", # weitere unmaintained-Advisories aus Tauri-Tree
+    "RUSTSEC-2025-0100", # weitere unmaintained-Advisories aus Tauri-Tree
+]
+
+# =================================================================== Licenses
+# Erlaubte SPDX-License-Identifier. Alles andere muss explizit per Exception
+# erlaubt werden.
+[licenses]
+confidence-threshold = 0.85
+# Private packages (publish = false) sind von der License-Whitelist
+# ausgenommen — unser eigenes `clipboard-pii` ist private und commitet
+# noch nicht zu einer SPDX-Lizenz (geplant: AGPL-3.0 für den Core).
+private = { ignore = true }
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "OpenSSL",       # OpenSSL-bezogene Crates (für späteren SQLCipher-Switch)
+    "WTFPL",
+    "Unlicense",
+    "0BSD",
+]
+exceptions = [
+    # CDDL-1.0 ist in einigen tauri-internen Code-Pfaden enthalten — passt
+    # zur LGPL-Family. Hier explizit erlauben falls es auftaucht.
+    # { allow = ["CDDL-1.0"], crate = "some-crate" },
+]
+
+# =================================================================== Bans
+# Crates, die wir explizit nicht haben wollen.
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = [
+    # Bekannte unsichere oder verlassene Crates — bei Bedarf erweitern.
+    # { name = "openssl", version = "<0.10" },
+]
+skip = []
+skip-tree = []
+
+# =================================================================== Sources
+# Nur crates.io als Registry — keine git-Dependencies, keine alternativen Indizes.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

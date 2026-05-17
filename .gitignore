@@ -1,0 +1,52 @@
+# Rust
+target/
+**/*.rs.bk
+# Cargo.lock is committed (binary project — pin exact dep versions across devices)
+
+# Node
+node_modules/
+dist/
+.pnpm-store/
+
+# Tauri
+src-tauri/target/
+src-tauri/target-ner/
+build-msi.log
+src-tauri/gen/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Env / Secrets
+.env
+.env.local
+*.pem
+*.key
+*.p12
+*.cer
+
+# Model files (zu groß für Git). Doku innerhalb des Modell-Ordners
+# bleibt aber drin, damit der Setup-Pfad nachvollziehbar ist.
+models/*
+!models/README.md
+!models/.gitignore
+*.onnx
+*.safetensors
+
+# Build artifacts
+*.msi
+*.dmg
+*.app
+*.exe
+
+# Logs
+*.log
+src-tauri/target-tests/

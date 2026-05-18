@@ -769,10 +769,7 @@ mod downloader {
     }
 
     /// Entpackt die ORT-Shared-Library aus dem heruntergeladenen Archive.
-    /// macOS/Linux: .tgz mit tar+gzip. Windows: .zip — aktuell nicht
-    /// vollständig implementiert, weil das `zip`-Crate eine zusätzliche
-    /// Abhängigkeit wäre. Fallback dort: User muss die DLL manuell
-    /// in den User-Daten-Pfad legen (Hinweis im Fehler).
+    /// macOS/Linux: .tgz mit tar+gzip. Windows: .zip mit dem `zip`-Crate.
     fn extract_ort_lib(archive: &std::path::Path, target: &std::path::Path) -> Result<()> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -793,11 +790,35 @@ mod downloader {
         }
         #[cfg(target_os = "windows")]
         {
+            use std::io::copy;
+
+            let file = std::fs::File::open(archive)
+                .with_context(|| format!("open archive {}", archive.display()))?;
+            let mut zip = zip::ZipArchive::new(file)
+                .with_context(|| format!("zip parse {}", archive.display()))?;
+            let needle = ort_lib_name();
+            for i in 0..zip.len() {
+                let mut entry = zip.by_index(i).context("zip entry")?;
+                // Zip-Einträge verwenden Forward-Slashes — nach dem letzten
+                // Slash splitten, statt Path::file_name (das Backslashes
+                // erwartet, wenn der Slash nicht als Separator durchgereicht
+                // wird).
+                let entry_name = entry.name().to_owned();
+                let base = entry_name.rsplit('/').next().unwrap_or(&entry_name);
+                if base == needle {
+                    let mut out = std::fs::File::create(target).with_context(|| {
+                        format!("create target {}", target.display())
+                    })?;
+                    copy(&mut entry, &mut out).with_context(|| {
+                        format!("extract {entry_name} → {}", target.display())
+                    })?;
+                    log::info!("ner download: extracted {}", target.display());
+                    return Ok(());
+                }
+            }
             anyhow::bail!(
-                "Win-Auto-Extract noch nicht implementiert — bitte onnxruntime.dll manuell aus \
-                 {} entpacken und nach {} kopieren",
-                archive.display(),
-                target.display()
+                "ORT-Shared-Library {needle} nicht in Archive {} gefunden",
+                archive.display()
             );
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]

@@ -98,16 +98,17 @@
     </div>
   {:else if step === 2}
     <h1>Verarbeitungsmodus</h1>
-    <p>Zwei Wege im Umgang mit PII:</p>
+    <p>Zwei Wege im Umgang mit personenbezogenen Daten:</p>
     <div class="options">
       <label class="option" class:selected={!draft.strict_mode}>
         <input type="radio" name="mode" checked={!draft.strict_mode} on:change={() => draft.strict_mode = false} />
         <div>
           <span class="opt-label">Reversibel <span class="opt-tag">Default</span></span>
           <p class="opt-hint">
-            PII wird durch Tokens ersetzt. Mapping bleibt lokal, du kannst
-            die LLM-Antwort zurückübersetzen. Tokens beim LLM sind
-            pseudonyme (= personenbezogene) Daten — DSGVO-Pflichten bleiben.
+            Personenbezogene Daten werden durch Tokens ersetzt. Mapping bleibt
+            lokal, du kannst die LLM-Antwort zurückübersetzen. Tokens beim
+            LLM sind pseudonyme (= personenbezogene) Daten — DSGVO-Pflichten
+            bleiben.
           </p>
         </div>
       </label>
@@ -116,9 +117,10 @@
         <div>
           <span class="opt-label">Strict (Anonymisierung)</span>
           <p class="opt-hint">
-            PII wird durch lesbare Platzhalter ersetzt. Kein Mapping wird
-            angelegt, Daten beim LLM sind anonym (ErwGr. 26 DSGVO). Trade-off:
-            kein Reverse — manuelle Zuordnung der LLM-Antwort.
+            Personenbezogene Daten werden durch lesbare Platzhalter ersetzt.
+            Kein Mapping wird angelegt, Daten beim LLM sind anonym
+            (ErwGr. 26 DSGVO). Trade-off: kein Reverse — manuelle Zuordnung
+            der LLM-Antwort.
           </p>
         </div>
       </label>

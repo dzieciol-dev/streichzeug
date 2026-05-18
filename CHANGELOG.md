@@ -4,6 +4,29 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ---
 
+## 0.5.1 — Beta-Feedback-Fixes
+
+**Bugfixes aus dem ersten Windows-Beta-Test:**
+
+- **Win-Auto-Extract der ORT-Runtime real implementiert.** `extract_ort_lib`
+  bailte unter Windows mit „Win-Auto-Extract noch nicht implementiert" und
+  ließ Beta-Tester die `onnxruntime.dll` händisch aus dem heruntergeladenen
+  `ort_archive.bin` ziehen. Jetzt: `zip`-Crate als optionale Dep im
+  `ner`-Feature, Win-Branch entpackt analog zu macOS/Linux. Onboarding-Flow
+  „Modell jetzt laden" läuft unter Win bis zur fertig geladenen NER-Engine
+  durch.
+
+**UX-Verbesserungen:**
+
+- „PII" durch „personenbezogene Daten" ersetzt im Onboarding-Wizard
+  (Step 2 „Verarbeitungsmodus") und in der Haupt-UI (Bullet-Liste +
+  beide Mode-Beschreibungen).
+- Release-Body zeigt jetzt einen **Win-SmartScreen-Hinweis**
+  parallel zum macOS-xattr-Block — Beta-Tester sehen vor dem Download,
+  wie sie die „Computer wurde geschützt"-Warnung legitim umgehen.
+
+---
+
 ## 0.5.0 — Initial public release
 
 Erste öffentliche Version von **Streichzeug**, einem lokalen Desktop-Tool

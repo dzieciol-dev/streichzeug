@@ -249,7 +249,7 @@
       statt <kbd>{prettyHotkey("CmdOrCtrl+V")}</kbd> drücken.
     </p>
     <ul class="bullets">
-      <li>Enthält der Text PII → fügt die anonymisierte Version ein</li>
+      <li>Enthält der Text personenbezogene Daten → fügt die anonymisierte Version ein</li>
       <li>Enthält der Text Tokens aus einer LLM-Antwort → fügt die Originale wieder ein</li>
       <li>Sonst → fügt unverändert ein, wie ein normales <kbd>{prettyHotkey("CmdOrCtrl+V")}</kbd></li>
     </ul>
@@ -271,11 +271,12 @@
         <strong>Reversibel (Default)</strong>
         <br />
         <span class="hint-inline">
-          PII werden durch Pseudonyme wie <code>«P_a4b»</code> ersetzt.
-          Eine lokale Mapping-Tabelle ermöglicht Rück-Übersetzung der
-          LLM-Antwort. <strong>Die Daten beim LLM sind weiterhin
-          personenbezogen</strong> (Art. 4(5) DSGVO) — der LLM-Einsatz
-          muss separat über AVV und Drittlandtransfer rechtmäßig sein.
+          Personenbezogene Daten werden durch Pseudonyme wie
+          <code>«P_a4b»</code> ersetzt. Eine lokale Mapping-Tabelle
+          ermöglicht Rück-Übersetzung der LLM-Antwort. <strong>Die Daten
+          beim LLM sind weiterhin personenbezogen</strong> (Art. 4(5) DSGVO)
+          — der LLM-Einsatz muss separat über AVV und Drittlandtransfer
+          rechtmäßig sein.
         </span>
       </span>
     </label>
@@ -290,10 +291,10 @@
         <strong>Strict — echte Anonymisierung</strong>
         <br />
         <span class="hint-inline">
-          PII werden durch lesbare Platzhalter wie <code>«Person A»</code>,
-          <code>«Organisation B»</code> ersetzt. <strong>Keine
-          Mapping-Tabelle</strong> — die Zuordnung existiert nirgends.
-          Damit sind die Daten beim LLM <strong>anonym</strong>
+          Personenbezogene Daten werden durch lesbare Platzhalter wie
+          <code>«Person A»</code>, <code>«Organisation B»</code> ersetzt.
+          <strong>Keine Mapping-Tabelle</strong> — die Zuordnung existiert
+          nirgends. Damit sind die Daten beim LLM <strong>anonym</strong>
           (ErwGr. 26 DSGVO), kein AVV-Bedarf. Trade-off: kein
           automatisches Reverse. Für Berufsgeheimnisträger und
           LLMs ohne AVV.

@@ -91,6 +91,10 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 futures-util = { version = "0.3", optional = true }
 flate2 = { version = "1.0", optional = true }
 tar = { version = "0.4", optional = true }
+# Win-only Entpacken der ORT-Runtime aus dem heruntergeladenen .zip.
+# Default-Features (deflate, bzip2, …) sind nicht nötig — die MS-Releases
+# verwenden Standard-Deflate.
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
 # Platform-specific
 [target.'cfg(windows)'.dependencies]
@@ -125,6 +129,7 @@ ner = [
     "dep:futures-util",
     "dep:flate2",
     "dep:tar",
+    "dep:zip",
 ]
 
 [profile.release]

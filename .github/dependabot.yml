@@ -20,6 +20,12 @@ updates:
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
+      # ort 2.0.0-rc.12 hat einen Crate-internen Build-Bug
+      # (vitis.rs:47 referenziert ein in ort-sys nicht existierendes
+      # Feld; VitisAI-Provider ist nicht per Feature-Flag abschaltbar).
+      # Entry entfernen, sobald rc.13 oder stable 2.0.0 draußen ist.
+      - dependency-name: "ort"
+        versions: ["2.0.0-rc.12"]
 
   # Frontend npm-Dependencies (Svelte + Vite + Tauri-API).
   - package-ecosystem: "npm"

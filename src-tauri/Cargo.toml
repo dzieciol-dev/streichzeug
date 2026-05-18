@@ -82,7 +82,7 @@ dirs = "5"
 # die ORT-Shared-Library zur Laufzeit (nicht statisch gelinkt) — damit bleibt
 # das Bundle klein, der User muss die ORT-Lib aber separat bereitstellen
 # (Download-Script in scripts/).
-ort = { version = "=2.0.0-rc.10", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["load-dynamic", "ndarray"] }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
 ndarray = { version = "0.16", optional = true }
 # HTTP-Download für Modell + ORT-Library. Wird zur Laufzeit beim ersten

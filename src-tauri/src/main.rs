@@ -384,6 +384,31 @@ fn main() {
                 })
                 .build(app)?;
 
+            // ----------------------------------- Plattform-Hinweis: Kernfeature
+            // Clipboard-Read/Write ist nur für Windows und macOS implementiert.
+            // Auf Linux (und sonstigen Plattformen) ist der Watcher ein Stub und
+            // read/write_clipboard_text liefern None/Err — Smart-Paste tut also
+            // nichts. Das darf beim Start nicht stillschweigend passieren.
+            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+            {
+                log::warn!(
+                    "=================================================================\n\
+                     ACHTUNG: Diese Plattform (nicht Windows/macOS) wird NICHT unterstützt.\n\
+                     Das Kernfeature (Clipboard-Erkennung + Smart-Paste) ist funktionslos —\n\
+                     der Clipboard-Watcher ist ein Stub. Streichzeug leistet hier nichts.\n\
+                     ================================================================="
+                );
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Streichzeug — Plattform nicht unterstützt")
+                    .body(
+                        "Clipboard-Erkennung und Smart-Paste funktionieren nur unter \
+                         Windows und macOS. Auf dieser Plattform tut die App nichts.",
+                    )
+                    .show();
+            }
+
             // ----------------------------------- Globaler Hotkey registrieren
             // Tauri's `GlobalShortcutExt::register` akzeptiert den Accelerator-
             // String und löst zu `CmdOrCtrl+B` → Strg+B (Win) / Cmd+B (Mac) auf.

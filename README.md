@@ -98,6 +98,9 @@ auf den Kontext zurückführen.
   lokalem Filezugriff lesbar.
 - **Memory-Dump** der laufenden App leakt Klartext-Mappings. SecureZeroMemory
   noch nicht implementiert.
+- **Nur Windows und macOS** — auf Linux ist das Kernfeature (Clipboard-Erkennung
+  + Smart-Paste) funktionslos (Stub-Watcher); die App warnt beim Start
+  entsprechend.
 
 Diese Schwächen sind im Repo als Issues getrackt — Pull Requests willkommen.
 

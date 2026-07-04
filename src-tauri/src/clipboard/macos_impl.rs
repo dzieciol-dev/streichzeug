@@ -91,6 +91,10 @@ impl ClipboardWatcher for MacosClipboardWatcher {
                         }
                     }
                 }
+                // TODO(adaptives-Polling): konstante 250 ms. ARCHITECTURE.md /
+                // clipboard.rs-Moduldoc beschreiben ein geplantes adaptives
+                // Intervall (200 ms bei LLM-App im Vordergrund, sonst 1000 ms),
+                // das hier noch NICHT umgesetzt ist — separates Vorhaben.
                 thread::sleep(Duration::from_millis(250));
             }
             log::info!("macOS clipboard watcher stopped");

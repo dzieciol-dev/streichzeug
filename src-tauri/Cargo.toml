@@ -91,6 +91,11 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 futures-util = { version = "0.3", optional = true }
 flate2 = { version = "1.0", optional = true }
 tar = { version = "0.4", optional = true }
+# Zip-Entpacken der Windows-ORT-Release (.zip statt .tgz). Nur der
+# Deflate-Reader via flate2 (bereits vorhanden) — kein aes/bzip2/zstd/lzma,
+# damit keine zusätzlichen Native-Deps oder problematischen Lizenzen ins
+# Dep-Tree kommen (deny.toml). Version gepinnt.
+zip = { version = "=4.0.0", optional = true, default-features = false, features = ["deflate-flate2"] }
 
 # Platform-specific
 [target.'cfg(windows)'.dependencies]
@@ -125,6 +130,7 @@ ner = [
     "dep:futures-util",
     "dep:flate2",
     "dep:tar",
+    "dep:zip",
 ]
 
 [profile.release]

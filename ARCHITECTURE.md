@@ -200,11 +200,14 @@ Beide Plattformen sind Tray-residente Apps, aber das OS-Verhalten
 unterscheidet sich genug, dass `main.rs::setup` an zwei Stellen
 plattform-gated Code hat:
 
-- **macOS** → `app.set_activation_policy(ActivationPolicy::Accessory)`.
-  Ohne diesen Aufruf wäre die App ein „Regular App" mit Dock-Icon
-  und Cmd+Tab-Eintrag — unpassend für eine reine Menubar-App. Mit
-  Accessory: kein Dock-Icon, kein Cmd+Tab, lebt nur im Tray (wie
-  1Password). Keine Auswirkung auf andere Plattformen.
+- **macOS** → `app.set_activation_policy(ActivationPolicy::Regular)`.
+  Die App erscheint mit Dock-Icon und Cmd+Tab-Eintrag wie eine normale
+  App (Mail/Notes). Zusammen mit Hide-on-Close und dem
+  `RunEvent::Reopen`-Handler (Dock-Klick bzw. erneutes Öffnen holt das
+  versteckte Fenster zurück) ergibt das Standard-macOS-Verhalten. Bewusst
+  kein `Accessory`/Tray-only mehr — die fenster-zentrierten Features (z. B.
+  Live-Schwärzung geladener Dateien) brauchen eine sichtbare, per Cmd+Tab
+  erreichbare App. Keine Auswirkung auf andere Plattformen.
 
 - **macOS-Tray-Icon** → monochromes Template (`icons/tray-icon.png`,
   P-Silhouette auf transparentem Grund), via `tauri::include_image!`

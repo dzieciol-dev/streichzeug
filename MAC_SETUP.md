@@ -112,15 +112,15 @@ Dasselbe Workflow wie auf Windows:
 
 ## UX-Erwartung auf macOS
 
-Anders als auf Windows ist die App auf macOS ab v0.4.1 eine
-**reine Menubar-App** (ActivationPolicy = Accessory):
+Die App erscheint auf macOS mit **Dock-Icon** (ActivationPolicy = Regular),
+wie eine normale App:
 
-- **Kein Dock-Icon** beim Starten.
-- **Kein Eintrag in Cmd+Tab**.
-- Hauptfenster öffnet sich übers Tray-Menü → „Fenster anzeigen".
-  Rotes Schließen-Kreuz / Cmd+W blendet das Fenster wieder aus,
-  beendet die App aber nicht.
-- Beenden ausschließlich übers Tray-Menü → „Beenden".
+- **Dock-Icon** und **Cmd+Tab-Eintrag** vorhanden.
+- Rotes Schließen-Kreuz / Cmd+W blendet das Fenster nur aus, beendet die
+  App aber nicht — sie läuft im Hintergrund weiter. Ein Klick aufs
+  Dock-Icon (oder erneutes Öffnen) holt das Fenster zurück; alternativ
+  übers Tray-Menü → „Fenster anzeigen".
+- Beenden übers Tray-Menü → „Beenden" (oder Cmd+Q bei aktivem Fenster).
 
 Das **Tray-Icon ist eine schwarze P-Silhouette** (Template-Image),
 das vom System in der Menubar-Akzentfarbe gerendert wird — passt

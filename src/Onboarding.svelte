@@ -257,7 +257,7 @@
     {#if step > 0}
       <button on:click={back}>Zurück</button>
     {:else}
-      <span />
+      <span></span>
     {/if}
     {#if step < STEPS_TOTAL - 1}
       <button class="primary" on:click={next}>Weiter</button>

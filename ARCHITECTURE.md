@@ -46,8 +46,8 @@ Frühere Iterationen hatten zusätzlich eine Browser-Extension mit Native-Messag
 | `detection.rs`                 | Detection-Pipeline (Layers L1, L2, L2b, L2c). Mit Unit-Tests. |
 | `tokens.rs`                    | HMAC-basierte Token-Generierung `«T_<hash>»`.                 |
 | `gazetteer.rs`                 | Statische DE-Namen + Städte.                                  |
-| `secrets.rs`                   | Pro-Installation zufälliger Master-Secret, persistiert.       |
-| `storage.rs`                   | SQLite-basierter Mapping-Store (WAL-Mode, Multi-Prozess-safe).|
+| `secrets.rs`                   | Pro-Installation zufälliger Master-Secret (OS-Keychain, Datei-Fallback); leitet DB-Schlüssel ab. |
+| `storage.rs`                   | SQLCipher-verschlüsselter Mapping-Store (WAL-Mode, Multi-Prozess-safe, Auto-Migration von Klartext-DBs). |
 | `clipboard.rs`                 | Cross-Platform Read/Write + `ClipboardWatcher`-Trait.         |
 | `clipboard/windows_impl.rs`    | Win-Watcher via `GetClipboardSequenceNumber`-Polling.         |
 | `clipboard/macos_impl.rs`      | Mac-Watcher via `NSPasteboard.changeCount`-Polling.           |
@@ -148,7 +148,9 @@ L3 (ONNX-NER) ist im Konzept dokumentiert, noch nicht implementiert.
 
 Beispiele: `«P_a4b3z2»`, `«E_xy7zk9»`.
 
-Der `master_secret` ist **pro Installation zufällig** generiert und in `$DATA_DIR/secret.bin` persistiert (Permissions 0600 auf Unix). Damit kollidieren Tokens nicht zwischen verschiedenen Usern auf derselben Maschine oder zwischen verschiedenen Installationen.
+Der `master_secret` ist **pro Installation zufällig** generiert und primär im **OS-Keychain** (macOS Keychain / Windows Credential Manager, via `keyring`-Crate) persistiert. Fällt der Keychain aus oder fehlt ein Backend, greift der Datei-Fallback `$DATA_DIR/secret.bin` (Permissions 0600 auf Unix); eine bestehende Datei wird beim Start automatisch in den Keychain migriert und danach sicher gelöscht. Damit kollidieren Tokens nicht zwischen verschiedenen Usern auf derselben Maschine oder zwischen verschiedenen Installationen.
+
+Aus dem `master_secret` wird zusätzlich der **SQLCipher-DB-Schlüssel** abgeleitet (`secrets::db_key_hex`, domain-separiert). Die Mapping-DB (`storage.db`) ist damit **AES-256-verschlüsselt**; eine bestehende unverschlüsselte DB wird beim ersten Start transparent nach SQLCipher migriert.
 
 ---
 
@@ -179,7 +181,7 @@ LLM-App-Whitelist:
 | Smart-Paste-Logik anpassen                 | `hotkey.rs::decide_action`              |
 | Neuer Tauri-Command für Frontend           | `main.rs` + `App.svelte`                |
 | Phase 1: Case-Manager mit Mehrfach-Cases   | neuer `case_manager.rs`, Storage erweitern |
-| Phase 2: SQLCipher-Verschlüsselung         | Cargo-Feature `bundled-sqlcipher-vendored-openssl` + Master-Key-Move in OS-Keychain (`keyring`-Crate) |
+| ~~Phase 2: SQLCipher-Verschlüsselung~~ (erledigt) | `storage.rs` (SQLCipher via `bundled-sqlcipher-vendored-openssl`, `migrate_plaintext_if_needed`) + `secrets.rs` (OS-Keychain via `keyring`, `db_key_hex`) |
 
 ---
 

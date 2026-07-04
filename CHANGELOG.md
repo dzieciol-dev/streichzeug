@@ -4,6 +4,41 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ---
 
+## [Unreleased]
+
+**Sicherheit / Härtung:**
+
+- **Mapping-DB mit SQLCipher (AES-256) verschlüsselt.** Der Schlüssel wird
+  aus dem Master-Secret abgeleitet, das nun im OS-Keychain (macOS Keychain /
+  Windows Credential Manager) mit Datei-Fallback liegt. Bestehende
+  unverschlüsselte DBs/Secrets werden beim ersten Start transparent migriert.
+- **ONNX-Runtime-Library wird per SHA-256 verifiziert** (Manifest), bevor sie
+  geladen wird; Installationen ohne Lib-Hash fordern sauber einen Re-Download.
+- Frische RUSTSEC-Advisories adressiert: `anyhow` 1.0.103, `quinn-proto`
+  0.11.15 (echte Fixes); quick-xml-DoS (transitiv über Tauri, im
+  Bedrohungsmodell nicht erreichbar) dokumentiert ignoriert.
+- **npm-Security-Upgrade**: vite 6, `vite-plugin-svelte` 5, svelte 5
+  (Legacy-Modus, keine Runes-Migration) → 0 npm-Vulnerabilities.
+
+**UX:**
+
+- **macOS: Dock-Icon** statt reiner Menüleisten-App. Rotes X versteckt nur
+  das Fenster (App läuft weiter); Dock-Klick bzw. erneutes Öffnen
+  (`RunEvent::Reopen`) holt es zurück. Vorbereitung für fenster-zentrierte
+  Features.
+- **Schlüsselbund-Zugriff wird im Onboarding angekündigt** und erst beim
+  Abschluss ausgelöst — kein unvermittelter macOS-Dialog beim ersten Start.
+- Sichtbare Fehlermeldungen statt stiller Logs bei fehlgeschlagenem Paste
+  (inkl. Hinweis auf macOS-Bedienungshilfen), ephemerem Secret-Fallback und
+  Settings-Speicherfehlern.
+
+**Detection:**
+
+- Steuer-ID-Erkennung verlangt jetzt ein Kontextwort plus Strukturregel —
+  deutlich weniger False-Positives auf beliebige 11-stellige Zahlen.
+
+---
+
 ## 0.5.1 — Beta-Feedback-Fixes
 
 **Bugfixes aus dem ersten Windows-Beta-Test:**

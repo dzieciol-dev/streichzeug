@@ -92,10 +92,11 @@ auf den Kontext zurückführen.
 
 ### Bekannte Schwächen
 
-- **Mapping-DB ist plain SQLite** (kein Encryption-at-Rest). Eine zukünftige
-  Version kann SQLCipher + OS-Keychain einbinden (`keyring`-Crate).
-- **Master-Secret als File auf der Platte** (statt OS-Keychain). Mit
-  lokalem Filezugriff lesbar.
+- **Zugriff bei entsperrtem Konto.** Die Mapping-DB ist mit SQLCipher
+  (AES-256) verschlüsselt und der Schlüssel liegt im OS-Keychain (macOS
+  Keychain / Windows Credential Manager, mit Datei-Fallback wo kein Keychain
+  verfügbar) — aber solange dein Benutzerkonto entsperrt ist, kann die App
+  und damit auch Schadsoftware unter demselben Konto die Daten lesen.
 - **Memory-Dump** der laufenden App leakt Klartext-Mappings. SecureZeroMemory
   noch nicht implementiert.
 - **Nur Windows und macOS** — auf Linux ist das Kernfeature (Clipboard-Erkennung
@@ -170,8 +171,9 @@ Beim ersten Drücken von **Cmd+Option+B** fragt macOS nach
 sonst funktioniert das Auto-Paste nicht. Die Permission ist eine
 OS-Sicherheitsmaßnahme, kein Bug der App.
 
-Die Mac-App ist eine **reine Menubar-App** (kein Dock-Icon, kein Cmd+Tab-
-Eintrag) mit monochromem Template-Tray-Icon — siehe
+Die Mac-App erscheint im **Dock** (rotes X versteckt nur das Fenster, die
+App läuft im Hintergrund weiter; Dock-Klick holt sie zurück) und hat
+zusätzlich ein monochromes Template-Tray-Icon in der Menüleiste — siehe
 [`MAC_SETUP.md`](MAC_SETUP.md) → „UX-Erwartung auf macOS".
 
 ### Windows (PowerShell)

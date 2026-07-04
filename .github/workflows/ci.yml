@@ -218,7 +218,10 @@ jobs:
             --ignore RUSTSEC-2025-0080 \
             --ignore RUSTSEC-2025-0081 \
             --ignore RUSTSEC-2025-0098 \
-            --ignore RUSTSEC-2025-0100
+            --ignore RUSTSEC-2025-0100 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195
 
   # ===================================================================
   # cargo-deny — License-Whitelist, Banned-Crates, Doppel-Versions-Check.

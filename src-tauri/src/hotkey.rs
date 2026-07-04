@@ -79,12 +79,12 @@ pub fn handle(app: &AppHandle) {
     // 1. Aktuellen Clipboard-Inhalt lesen.
     let Some(original) = crate::clipboard::read_clipboard_text() else {
         log::info!("hotkey: clipboard empty or unreadable, sending plain paste");
-        send_paste();
+        send_paste_reporting(app);
         return;
     };
     if original.is_empty() {
         log::info!("hotkey: clipboard text is empty, sending plain paste");
-        send_paste();
+        send_paste_reporting(app);
         return;
     }
 
@@ -97,7 +97,7 @@ pub fn handle(app: &AppHandle) {
             original.len(),
             MAX_CLIPBOARD_BYTES
         );
-        send_paste();
+        send_paste_reporting(app);
         if crate::settings::Settings::load().enable_notifications {
             let _ = app
                 .notification()
@@ -125,7 +125,7 @@ pub fn handle(app: &AppHandle) {
         // 3a. Transformierte Version ins Clipboard schreiben.
         if let Err(e) = crate::clipboard::write_clipboard_text(transformed) {
             log::warn!("hotkey: clipboard write failed: {e}, sending plain paste");
-            send_paste();
+            send_paste_reporting(app);
             return;
         }
         log::info!(
@@ -141,11 +141,11 @@ pub fn handle(app: &AppHandle) {
         // Remote-Sessions) konnte die App das Clipboard erst nach dem
         // Restore auslesen und kriegte dann den Klartext statt des
         // Pseudonyms. Sicherer ist: kein Restore.
-        send_paste();
+        send_paste_reporting(app);
         log::info!("hotkey: synthetic paste sent, pseudonym remains in clipboard");
     } else {
         // Kein Transform — einfach den Standard-Paste durchreichen.
-        send_paste();
+        send_paste_reporting(app);
     }
 
     // 4. User informieren — Notification mit kurzer Erfolgsmeldung.
@@ -290,7 +290,72 @@ fn has_any_token(text: &str) -> bool {
     RE.is_match(text)
 }
 
+/// Ursache eines fehlgeschlagenen synthetischen Paste-Versuchs.
+///
+/// Wird an [`paste_error_body`] übergeben, um eine für den Nutzer
+/// verständliche Fehlermeldung mit Diagnosehinweis zu erzeugen.
+enum PasteError {
+    /// `Enigo::new()` schlug fehl. Häufigste Ursache auf macOS: die App
+    /// hat keine Bedienungshilfen-Berechtigung (Accessibility).
+    InitFailed(String),
+    /// Ein Key-Event wurde vom OS abgelehnt. Auf Windows/Linux typischer-
+    /// weise durch EDR/AV blockiert, auf macOS ebenfalls fehlende
+    /// Accessibility-Rechte.
+    KeySendFailed(String),
+}
+
+/// Baut die für den Nutzer sichtbare Fehlermeldung inkl. Diagnosehinweis.
+///
+/// Ausgelagert (und plattform-neutral im Rückgabewert), damit die
+/// Entscheidungslogik unit-testbar ist ohne echte OS-Aufrufe.
+fn paste_error_body(err: &PasteError) -> String {
+    let base = match err {
+        PasteError::InitFailed(e) => {
+            format!("Automatisches Einfügen fehlgeschlagen (Initialisierung): {e}")
+        }
+        PasteError::KeySendFailed(e) => {
+            format!("Automatisches Einfügen fehlgeschlagen: {e}")
+        }
+    };
+    #[cfg(target_os = "macos")]
+    {
+        format!(
+            "{base}\n\nStreichzeug braucht die Berechtigung „Bedienungshilfen\": \
+Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen → \
+Streichzeug aktivieren. Danach die App neu starten."
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        format!(
+            "{base}\n\nMöglicherweise blockiert eine Sicherheits-Software \
+(EDR/Antivirus) die simulierte Tastatureingabe."
+        )
+    }
+}
+
+/// Führt einen synthetischen Paste aus und zeigt bei Fehlern **immer**
+/// eine sichtbare Fehler-Notification — auch wenn `enable_notifications`
+/// aus ist. Begründung: Das ist ein Fehler-, kein Komfort-Kanal. Ohne
+/// dieses Feedback wirkt der Hotkey für den Nutzer schlicht wirkungslos.
+fn send_paste_reporting(app: &AppHandle) {
+    if let Err(e) = send_paste() {
+        let body = paste_error_body(&e);
+        log::warn!("hotkey: paste failed, notifying user: {body}");
+        let _ = app
+            .notification()
+            .builder()
+            .title("Streichzeug — Einfügen fehlgeschlagen")
+            .body(body)
+            .show();
+    }
+}
+
 /// Simuliert ein Strg+V (Cmd+V auf macOS) an die aktive App.
+///
+/// Gibt `Err(PasteError)` zurück, wenn die Tastatur-Simulation nicht
+/// durchkam — der Aufrufer ([`send_paste_reporting`]) macht daraus eine
+/// sichtbare Fehlermeldung.
 ///
 /// # Bold-Toggle-Vermeidung
 ///
@@ -305,7 +370,7 @@ fn has_any_token(text: &str) -> bool {
 /// 2. **Alle Modifier explizit auf Release setzen** vor der Strg+V-
 ///    Sequenz. Wenn die schon released sind, ist das ein No-Op.
 /// 3. Erst dann unsere Strg+V-Press/Click/Release-Sequenz schicken.
-fn send_paste() {
+fn send_paste() -> Result<(), PasteError> {
     use enigo::{Direction, Enigo, Key, Keyboard, Settings as EnigoSettings};
 
     std::thread::sleep(Duration::from_millis(100));
@@ -314,7 +379,7 @@ fn send_paste() {
         Ok(e) => e,
         Err(e) => {
             log::warn!("hotkey: enigo init failed: {e:?}");
-            return;
+            return Err(PasteError::InitFailed(format!("{e:?}")));
         }
     };
 
@@ -350,9 +415,15 @@ fn send_paste() {
     if let Err(e) = &r3 {
         log::warn!("hotkey: enigo modifier release failed: {e:?}");
     }
-    if r1.is_ok() && r2.is_ok() && r3.is_ok() {
-        log::info!("hotkey: enigo Strg+V sequence returned Ok for all 3 calls");
+    // Schlägt irgendein Schritt der eigentlichen Strg+V-Sequenz fehl,
+    // ist der Paste nicht durchgekommen → Fehler an den Nutzer melden.
+    for r in [&r1, &r2, &r3] {
+        if let Err(e) = r {
+            return Err(PasteError::KeySendFailed(format!("{e:?}")));
+        }
     }
+    log::info!("hotkey: enigo Strg+V sequence returned Ok for all 3 calls");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -401,6 +472,32 @@ mod tests {
         assert!(
             !r.contains("«P_xyz789»"),
             "expected token to be replaced, got: {r}"
+        );
+    }
+
+    #[test]
+    fn paste_error_body_reports_failure() {
+        // Beide Fehlerarten müssen als „fehlgeschlagen" erkennbar sein
+        // und die Original-Fehlermeldung durchreichen.
+        let init = paste_error_body(&PasteError::InitFailed("boom".into()));
+        assert!(init.contains("fehlgeschlagen"), "got: {init}");
+        assert!(init.contains("boom"), "underlying error should surface: {init}");
+
+        let key = paste_error_body(&PasteError::KeySendFailed("nope".into()));
+        assert!(key.contains("fehlgeschlagen"), "got: {key}");
+        assert!(key.contains("nope"), "underlying error should surface: {key}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn paste_error_body_hints_accessibility_on_macos() {
+        // Auf macOS ist die häufigste Ursache die fehlende
+        // Bedienungshilfen-Berechtigung — der Diagnosehinweis muss darauf
+        // zeigen, sonst sucht der Nutzer im Nichts.
+        let body = paste_error_body(&PasteError::InitFailed("x".into()));
+        assert!(
+            body.contains("Bedienungshilfen"),
+            "macOS body should mention Accessibility permission: {body}"
         );
     }
 }

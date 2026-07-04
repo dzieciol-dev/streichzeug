@@ -38,6 +38,13 @@
 use once_cell::sync::Lazy;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Wird auf `true` gesetzt, wenn [`load_or_generate`] fehlschlug und wir
+/// auf ein ephemeres Sitzungs-Secret ausgewichen sind. Dann sind **alle
+/// bestehenden Tokens für immer unlesbar** — der Nutzer muss darüber
+/// informiert werden (siehe [`used_ephemeral_fallback`]).
+static EPHEMERAL_FALLBACK: AtomicBool = AtomicBool::new(false);
 
 /// Anwendungs-Verzeichnis unter `$DATA_DIR`. Muss zur `identifier`-Property
 /// in `tauri.conf.json` und zum Storage-Modul passen.
@@ -65,6 +72,11 @@ static MASTER_SECRET: Lazy<Vec<u8>> = Lazy::new(|| {
             // ephemere zufällige Sitzung-Secret bereitstellen. Reverse-Mapping
             // funktioniert dann nur innerhalb der laufenden Session.
             log::error!("master secret init failed: {e}; using ephemeral fallback");
+            // Flag für den User-Hinweis setzen (main.rs prüft es beim
+            // Setup und zeigt eine Warnung). Bestehende Tokens werden mit
+            // diesem Zufalls-Secret nie wieder lesbar — das darf nicht
+            // stillschweigend passieren.
+            EPHEMERAL_FALLBACK.store(true, Ordering::Relaxed);
             let mut buf = vec![0u8; SECRET_LEN];
             // Selbst der Fallback braucht Zufall — wenn auch der schief geht,
             // bleibt nur Panik. Reine HMAC-Sicherheit hängt vom RNG ab.
@@ -78,6 +90,26 @@ static MASTER_SECRET: Lazy<Vec<u8>> = Lazy::new(|| {
 /// generiert; alle weiteren Aufrufe sind O(1) (statisches `&[u8]`).
 pub fn master_secret() -> &'static [u8] {
     MASTER_SECRET.as_slice()
+}
+
+/// `true`, wenn das Master-Secret **nicht** persistiert werden konnte und
+/// wir auf ein ephemeres, pro Prozessstart neu zufälliges Secret aus-
+/// gewichen sind. In diesem Fall sind alle vor diesem Start erzeugten
+/// Tokens nicht mehr rückübersetzbar.
+///
+/// Erst aussagekräftig, **nachdem** [`master_secret`] mindestens einmal
+/// aufgerufen wurde (die Init ist lazy). [`init`] erzwingt das.
+pub fn used_ephemeral_fallback() -> bool {
+    EPHEMERAL_FALLBACK.load(Ordering::Relaxed)
+}
+
+/// Erzwingt die (sonst lazy) Initialisierung des Master-Secrets und meldet
+/// zurück, ob dabei der ephemere Fallback gegriffen hat. Beim App-Start
+/// aufrufen, damit ein Fehler früh und sichtbar wird statt erst beim
+/// ersten Hotkey-Druck.
+pub fn init() -> bool {
+    let _ = master_secret();
+    used_ephemeral_fallback()
 }
 
 /// Leitet ein Case-spezifisches Secret aus dem Master ab. Damit sind
@@ -191,5 +223,14 @@ mod tests {
         // Test-Modus liefert einen fixed-Wert, der ist nicht zwingend
         // 32 Byte lang. Aber zumindest nicht-leer.
         assert!(!master_secret().is_empty());
+    }
+
+    #[test]
+    fn test_no_ephemeral_fallback_in_test_mode() {
+        // Unter #[cfg(test)] liefert MASTER_SECRET einen festen Wert und
+        // ruft load_or_generate() nie auf — der Fallback darf also nicht
+        // markiert sein.
+        assert!(!init());
+        assert!(!used_ephemeral_fallback());
     }
 }

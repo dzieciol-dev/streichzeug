@@ -183,6 +183,47 @@ fn clear_all_mappings() -> usize {
     storage::purge_all()
 }
 
+/// Zeigt die einmalige Warnung, dass das Master-Secret nicht persistiert
+/// werden konnte und diese Sitzung ein temporäres (ephemeres) Secret nutzt —
+/// bestehende Tokens sind dann nicht mehr rückübersetzbar. Fehler-Kanal,
+/// bewusst unabhängig von `enable_notifications`.
+fn warn_ephemeral_fallback(app: &tauri::AppHandle) {
+    log::error!(
+        "master secret ephemeral fallback active — bestehende Tokens sind nicht mehr rückübersetzbar"
+    );
+    let _ = app
+        .notification()
+        .builder()
+        .title("Streichzeug — Schlüssel nicht gespeichert")
+        .body(
+            "Der Verschlüsselungs-Schlüssel konnte nicht gespeichert werden. \
+Diese Sitzung nutzt einen temporären Schlüssel: bereits pseudonymisierte Texte lassen \
+sich nicht mehr zurückübersetzen, und neue Pseudonyme gelten nur bis zum Beenden der App. \
+Bitte Schreibrechte im App-Datenverzeichnis prüfen und die App neu starten.",
+        )
+        .show();
+}
+
+/// Frontend-Command: schließt die Ersteinrichtung ab, indem der
+/// Verschlüsselungs-Schlüssel initialisiert wird. Genau hier fragt
+/// macOS/Windows **einmalig** nach Schlüsselbund-Zugriff — der Onboarding-
+/// Wizard kündigt das im letzten Schritt direkt davor an, damit der Dialog
+/// nicht unvermittelt kommt. Öffnet zusätzlich die verschlüsselte Mapping-DB
+/// (legt sie an bzw. migriert eine bestehende Klartext-DB), damit auch der
+/// abgeleitete SQLCipher-Schlüssel jetzt mit Kontext angefordert wird.
+///
+/// Gibt `true` zurück, wenn kein persistenter Schlüssel möglich war
+/// (ephemerer Fallback aktiv) — das Frontend zeigt dann einen Hinweis.
+#[tauri::command]
+fn finalize_secret_setup(app: tauri::AppHandle) -> bool {
+    let ephemeral = secrets::init();
+    let _ = storage::mapping_count();
+    if ephemeral {
+        warn_ephemeral_fallback(&app);
+    }
+    ephemeral
+}
+
 // =================================================================== Entry-Point
 
 fn main() {
@@ -208,10 +249,17 @@ fn main() {
     // - retention_minutes == 0: „nur diese Session" — alle Mappings
     //   aus vorigen Sessions löschen, in dieser Session werden Mappings
     //   wieder aufgebaut und beim nächsten Start wieder weggeräumt
-    if cfg.retention_minutes == 0 {
-        storage::purge_all();
-    } else {
-        storage::purge_older_than(cfg.retention_minutes);
+    // Der Start-Purge öffnet die verschlüsselte Mapping-DB und löst damit
+    // den ersten Schlüsselbund-Zugriff (macOS-Dialog) aus. Beim allerersten
+    // Start wird das bewusst aufgeschoben: erst nach dem Onboarding, in dem
+    // wir den Dialog ankündigen (siehe finalize_secret_setup). Vor dem
+    // Onboarding existiert ohnehin keine DB, es gäbe nichts zu löschen.
+    if cfg.onboarded {
+        if cfg.retention_minutes == 0 {
+            storage::purge_all();
+        } else {
+            storage::purge_older_than(cfg.retention_minutes);
+        }
     }
 
     // Periodischer Purge-Thread. Läuft alle 5 Minuten und löscht
@@ -251,6 +299,7 @@ fn main() {
             get_version,
             get_storage_status,
             clear_all_mappings,
+            finalize_secret_setup,
         ])
         .setup(move |app| {
             // ----------------------------------- Master-Secret prüfen
@@ -260,29 +309,26 @@ fn main() {
             // immer unlesbar**. Das darf nicht still passieren: einmalige
             // Warnung an den Nutzer (Fehler-Kanal, unabhängig von
             // enable_notifications).
-            if secrets::init() {
-                log::error!(
-                    "master secret ephemeral fallback active — bestehende Tokens sind nicht mehr rückübersetzbar"
-                );
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("Streichzeug — Schlüssel nicht gespeichert")
-                    .body(
-                        "Der Verschlüsselungs-Schlüssel konnte nicht gespeichert werden. \
-Diese Sitzung nutzt einen temporären Schlüssel: bereits pseudonymisierte Texte lassen \
-sich nicht mehr zurückübersetzen, und neue Pseudonyme gelten nur bis zum Beenden der App. \
-Bitte Schreibrechte im App-Datenverzeichnis prüfen und die App neu starten.",
-                    )
-                    .show();
+            //
+            // Nur für bereits eingerichtete Installationen (onboarded). Beim
+            // allerersten Start wird der Secret-/Schlüsselbund-Zugriff
+            // aufgeschoben, bis der Nutzer ihn im Onboarding bestätigt hat
+            // (Command `finalize_secret_setup`) — sonst käme der macOS-Dialog
+            // unangekündigt vor dem Wizard.
+            if Settings::load().onboarded && secrets::init() {
+                warn_ephemeral_fallback(app.handle());
             }
 
-            // ----------------------------------- macOS: Accessory-Policy
-            // Kein Dock-Icon, kein Eintrag in Cmd+Tab — die App lebt nur
-            // im Menubar-Tray (wie 1Password). Auf anderen Plattformen ist
-            // diese API ein No-Op.
+            // ----------------------------------- macOS: Regular-Policy
+            // Dock-Icon + Cmd+Tab-Eintrag wie eine normale App (Mail/Notes).
+            // Zusammen mit Hide-on-Close und dem Reopen-Handler (siehe unten
+            // in run()) ergibt das Standard-macOS-Verhalten: Rotes X versteckt
+            // das Fenster, App bleibt im Dock, Dock-Klick holt es zurück.
+            // Bewusst *kein* Accessory/Tray-only mehr — die geplanten
+            // fenster-zentrierten Features (z. B. Live-Schwärzung geladener
+            // Dateien) brauchen eine sichtbare, per Cmd+Tab erreichbare App.
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
             // ----------------------------------- Hide-on-close
             if let Some(window) = app.get_webview_window("main") {
@@ -488,8 +534,24 @@ Bitte Schreibrechte im App-Datenverzeichnis prüfen und die App neu starten.",
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Dock-Klick (bzw. erneutes Öffnen via Finder/Launchpad/`open -a`)
+            // bei verstecktem Fenster holt es zurück nach vorn. macOS liefert
+            // hierfür kein WindowEvent, sondern das RunEvent::Reopen — ohne
+            // diesen Handler bliebe das Dock-Icon nach dem Schließen (Hide)
+            // wirkungslos.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                if let Some(w) = app_handle.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
+        });
 }
 
 // =================================================================== Optionaler Watcher

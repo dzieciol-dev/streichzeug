@@ -55,6 +55,15 @@
     } catch (e) {
       console.error("save failed", e);
     }
+    // Jetzt — nachdem der letzte Schritt den Schlüsselbund-Zugriff angekündigt
+    // hat — den Verschlüsselungs-Schlüssel initialisieren. Genau hier zeigt
+    // macOS den einmaligen Schlüsselbund-Dialog. finalize_secret_setup meldet
+    // einen etwaigen Fallback selbst per Notification.
+    try {
+      await invoke("finalize_secret_setup");
+    } catch (e) {
+      console.error("secret setup failed", e);
+    }
     dispatch("done");
   }
 </script>
@@ -110,10 +119,12 @@
             pseudonyme (= personenbezogene) Daten — DSGVO-Pflichten bleiben.
           </p>
           <p class="opt-caution">
-            Ehrlich dazu: Die Mapping-DB liegt aktuell <strong>unverschlüsselt</strong>
-            lokal auf der Platte (Klartext, kein Encryption-at-Rest). Wer
-            Zugriff auf deinen Rechner hat, kann sie lesen. Willst du keinerlei
-            lokales Klartext-Mapping, nimm Strict.
+            Ehrlich dazu: Es entsteht eine lokale Mapping-DB. Sie liegt
+            <strong>verschlüsselt</strong> auf der Platte (SQLCipher; der
+            Schlüssel steckt im OS-Schlüsselbund, nicht in der Datei). Solange
+            dein Benutzerkonto entsperrt ist, kann die App — und damit potenziell
+            Schadsoftware unter deinem Konto — sie lesen. Willst du gar kein
+            lokales Mapping, nimm Strict.
           </p>
         </div>
       </label>
@@ -208,19 +219,36 @@
       und Sicherheit, Bedienungshilfen, Häkchen bei Streichzeug.
     </p>
   {:else}
-    <h1>Streichzeug lebt in deiner Menubar</h1>
+    <h1>Fast fertig</h1>
     {#if isMac}
       <p>
-        Streichzeug hat kein Dock-Icon. Du findest die App über das
-        P-Icon in der Menubar oben rechts.
+        Streichzeug erscheint ab jetzt im Dock. Das rote X schließt die App
+        nicht, sondern versteckt nur das Fenster — sie läuft im Hintergrund
+        weiter. Ein Klick aufs Dock-Icon holt das Fenster zurück; zusätzlich
+        findest du sie über das Icon in der Menüleiste oben rechts.
       </p>
+      <div class="info-box">
+        <h3>Ein letzter Schritt: Schlüsselbund</h3>
+        <p style="margin: 0;">
+          Streichzeug legt seinen Verschlüsselungs-Schlüssel sicher im
+          macOS-Schlüsselbund ab — nicht als lose Datei. Wenn du auf
+          <strong>Fertig</strong> klickst, fragt macOS dich dafür
+          <strong>einmalig</strong> um Erlaubnis. Bitte wähle dort
+          <strong>„Immer erlauben"</strong>, sonst fragt macOS bei jedem Start
+          erneut.
+        </p>
+      </div>
     {:else}
       <p>
-        Streichzeug läuft als Tray-Icon in der Taskleiste (unten rechts,
-        evtl. unter dem Pfeil-Aufklapper).
+        Streichzeug läuft weiter im Hintergrund. Das Fenster erreichst du
+        jederzeit über das Dock/die Taskleiste und das Tray-Icon (unten
+        rechts, evtl. unter dem Pfeil-Aufklapper).
+      </p>
+      <p class="hint">
+        Den Verschlüsselungs-Schlüssel legt Streichzeug sicher im
+        Windows-Anmeldeinformationsspeicher ab, nicht als lose Datei.
       </p>
     {/if}
-    <p>Klick auf das Tray-Icon, Fenster anzeigen — wenn du die Settings wieder sehen willst.</p>
   {/if}
 
   <div class="nav">

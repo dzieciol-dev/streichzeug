@@ -85,10 +85,17 @@
     } catch (e) {
       console.error("version load failed", e);
     }
-    try {
-      storageStatus = await invoke<StorageStatus>("get_storage_status");
-    } catch (e) {
-      console.error("storage status load failed", e);
+    // get_storage_status öffnet die verschlüsselte Mapping-DB und würde damit
+    // den Schlüsselbund-Zugriff auslösen. Beim allerersten Start (noch nicht
+    // onboarded) deshalb überspringen — der Wizard kündigt den Zugriff an und
+    // stößt ihn per finalize_secret_setup an; danach lädt onOnboardingDone
+    // den Status nach.
+    if (settings.onboarded) {
+      try {
+        storageStatus = await invoke<StorageStatus>("get_storage_status");
+      } catch (e) {
+        console.error("storage status load failed", e);
+      }
     }
   }
 

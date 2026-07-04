@@ -5,13 +5,18 @@
 //! `windows_impl` und `macos_impl`. Per `#[cfg(target_os)]` wird genau eine
 //! davon eingebunden.
 //!
-//! # Plattform-Verhalten (geplant, aktuell beide stub)
+//! # Plattform-Verhalten
 //!
-//! - **Windows**: `AddClipboardFormatListener` + Message-Only-Window mit
-//!   `WM_CLIPBOARDUPDATE`. Push-API, ~1 ms Latenz.
-//! - **macOS**: `NSPasteboard.changeCount`-Polling (kein Push-API). Adaptive
-//!   Frequenz: 200 ms wenn LLM-App im Vordergrund, 1000 ms sonst (Battery-Drain
-//!   sonst auf MacBook Air spürbar).
+//! - **Windows**: aktuell `GetClipboardSequenceNumber`-Polling im festen
+//!   250-ms-Takt (nicht das geplante Push-API via `AddClipboardFormatListener`
+//!   / `WM_CLIPBOARDUPDATE`).
+//! - **macOS**: `NSPasteboard.changeCount`-Polling (kein Push-API), ebenfalls
+//!   im festen 250-ms-Takt.
+//!
+//! TODO(adaptives-Polling): Geplant, aber **nicht** implementiert, war eine
+//! adaptive Frequenz (z. B. 200 ms wenn eine LLM-App im Vordergrund ist,
+//! 1000 ms sonst, gegen Battery-Drain auf dem MacBook Air). Beide Impls pollen
+//! derzeit konstant mit 250 ms — separates Vorhaben.
 //!
 //! Beide rufen den Callback mit dem Plain-Text-Inhalt auf, sobald sich das
 //! Clipboard ändert. Self-Loop wird über Sequence-Number-Tracking vermieden:

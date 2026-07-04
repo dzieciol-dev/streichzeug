@@ -62,11 +62,12 @@ env_logger = "0.11"
 anyhow = "1"
 thiserror = "1"
 
-# Storage. `bundled` linkt SQLite statisch — keine system-Abhängigkeit.
-# Phase 2: Feature-Switch auf `bundled-sqlcipher-vendored-openssl` für
-# transparente AES-256-Verschlüsselung der DB-Datei (kompiliert OpenSSL mit,
-# erstes Build ~5 Minuten länger).
-rusqlite = { version = "0.31", features = ["bundled"] }
+# Storage. `bundled-sqlcipher-vendored-openssl` linkt SQLite + SQLCipher
+# statisch und kompiliert OpenSSL vendored mit — keine System-Abhängigkeit,
+# transparente AES-256-Verschlüsselung der DB-Datei. Der DB-Schlüssel wird
+# aus dem Master-Secret abgeleitet (siehe `secrets::db_key_hex`). Erstes Build
+# dauert durch den OpenSSL-Compile ~5 Minuten länger.
+rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 
 # Cross-platform data-dir resolution. Sowohl Tauri-UI als auch NMH-Child
 # müssen denselben Pfad auflösen, damit sie sich die DB teilen.
@@ -93,11 +94,18 @@ flate2 = { version = "1.0", optional = true }
 tar = { version = "0.4", optional = true }
 # Win-only Entpacken der ORT-Runtime aus dem heruntergeladenen .zip.
 # Default-Features (deflate, bzip2, …) sind nicht nötig — die MS-Releases
-# verwenden Standard-Deflate.
+# verwenden Standard-Deflate. Nur der Deflate-Reader, damit keine
+# zusätzlichen Native-Deps oder problematischen Lizenzen ins Dep-Tree
+# kommen (deny.toml).
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
+# Master-Secret im OS-Keychain (macOS Keychain / Windows Credential Manager)
+# statt in einer 0600-Datei. `keyring` v3 mit den nativen Backends. Auf
+# Plattformen ohne unterstütztes Backend (bzw. wenn der Keychain zur Laufzeit
+# nicht verfügbar ist) fällt `secrets.rs` transparent auf die Datei zurück.
 # Platform-specific
 [target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_DataExchange",
@@ -110,6 +118,7 @@ windows = { version = "0.58", features = [
 clipboard-win = "5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSPasteboard", "NSWorkspace", "NSRunningApplication"] }
 objc2-foundation = { version = "0.2", features = ["NSString", "NSArray"] }

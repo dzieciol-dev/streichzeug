@@ -39,6 +39,12 @@ ignore = [
     "RUSTSEC-2025-0098", # weitere unmaintained-Advisories aus Tauri-Tree
     "RUSTSEC-2025-0100", # weitere unmaintained-Advisories aus Tauri-Tree
     "RUSTSEC-2024-0436", # paste 1.0.15 — Author hat das Repo archiviert
+    # quick-xml (0.37/0.38/0.39) DoS beim XML-Parsen — transitiv über den
+    # Tauri-Build/Bundler-Tree. Nicht auf >=0.41 aktualisierbar, solange die
+    # Tauri-Deps auf ältere quick-xml-Ranges gepinnt sind. Im Bedrohungsmodell
+    # nicht erreichbar: die App parst kein von außen kontrolliertes XML.
+    "RUSTSEC-2026-0194", # quick-xml — Quadratic runtime bei doppelten Attributnamen
+    "RUSTSEC-2026-0195", # quick-xml — unbounded namespace-alloc (memory-DoS)
 ]
 
 # =================================================================== Licenses

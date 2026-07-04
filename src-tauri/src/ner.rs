@@ -71,14 +71,77 @@ pub fn is_ready() -> bool {
     inference::is_ready()
 }
 
+/// Plattform-spezifischer Dateiname der ONNX-Runtime-Shared-Library.
+/// Immer kompiliert (auch ohne `ner`-Feature), damit Existenz- und
+/// Manifest-Checks in [`model_files_present`] plattformkonsistent bleiben.
+pub(crate) fn native_lib_filename() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "libonnxruntime.dylib"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "onnxruntime.dll"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "libonnxruntime.so"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        "libonnxruntime.so"
+    }
+}
+
 /// Prüft, ob die Modell-Files lokal liegen (Status für Onboarding/UI).
-/// Schaut im User-Daten-Verzeichnis nach `model.onnx`. Reine Existenzprüfung,
-/// keine Hash-Verifikation — die übernimmt der Engine-Loader.
+/// Schaut im User-Daten-Verzeichnis nach Modell, Tokenizer, nativer
+/// ORT-Library und Manifest. Reine Existenzprüfung, **keine**
+/// Hash-Verifikation — die übernimmt der Engine-Loader.
+///
+/// Zusätzlich: das Manifest muss die native ORT-Library listen. Alte
+/// Manifeste (vor der Lib-Hash-Härtung) enthalten keinen Lib-Eintrag —
+/// die behandeln wir hier bewusst als „nicht vollständig vorhanden", damit
+/// Onboarding/UI einen Re-Download anbieten statt eine unverifizierte Lib
+/// zu laden.
 pub fn model_files_present() -> bool {
     let Some(dir) = user_models_dir() else { return false };
+    let manifest = dir.join("MANIFEST.sha256");
     dir.join("model.onnx").exists()
         && dir.join("tokenizer.json").exists()
-        && dir.join("MANIFEST.sha256").exists()
+        && dir.join(native_lib_filename()).exists()
+        && manifest.exists()
+        && manifest_lists_native_lib(&manifest)
+}
+
+/// Liest das Manifest und prüft, ob es eine Zeile für die native
+/// ORT-Library ([`native_lib_filename`]) enthält. Toleriert BOM und
+/// Kommentarzeilen (gleiches Format wie [`inference::verify_manifest`]).
+/// Bei Lesefehler → `false` (behandeln wie „fehlt").
+fn manifest_lists_native_lib(manifest_path: &std::path::Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(manifest_path) else {
+        return false;
+    };
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+    let lib = native_lib_filename();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Format: "<hash>  <relative-path>" — Pfad ist das zweite Feld.
+        if let Some((_, rel)) = line.split_once(char::is_whitespace) {
+            let rel = rel.trim();
+            // Vergleich über den Dateinamen, robust gegen "./"-Präfixe.
+            if std::path::Path::new(rel)
+                .file_name()
+                .and_then(|n| n.to_str())
+                == Some(lib)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Zielverzeichnis für [`download_models`]: `<LOCALAPPDATA>/de.streichzeug.app/models/`.
@@ -238,13 +301,7 @@ mod inference {
 
     /// Plattform-spezifischer Filename der ONNX-Runtime-Shared-Library.
     fn dylib_path(models_dir: &std::path::Path) -> PathBuf {
-        #[cfg(target_os = "macos")]
-        let name = "libonnxruntime.dylib";
-        #[cfg(target_os = "windows")]
-        let name = "onnxruntime.dll";
-        #[cfg(target_os = "linux")]
-        let name = "libonnxruntime.so";
-        models_dir.join(name)
+        models_dir.join(super::native_lib_filename())
     }
 
     /// Liest `MANIFEST.sha256` und vergleicht die erwarteten Hashes mit den
@@ -280,6 +337,8 @@ mod inference {
         // Das BOM würde sonst die erste Zeile vor „#" stellen und unseren
         // Kommentar-Check brechen.
         let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+        let native_lib = super::native_lib_filename();
+        let mut saw_native_lib = false;
         let mut entries = 0;
         for (lineno, line) in content.lines().enumerate() {
             let line = line.trim();
@@ -307,11 +366,26 @@ mod inference {
                 expected,
                 actual
             );
+            if std::path::Path::new(rel).file_name().and_then(|n| n.to_str()) == Some(native_lib) {
+                saw_native_lib = true;
+            }
             entries += 1;
         }
         anyhow::ensure!(
             entries > 0,
             "manifest ist leer — mindestens model.onnx + tokenizer.json eintragen"
+        );
+        // Migration/Härtung: Die native ORT-Library wird per ORT_DYLIB_PATH
+        // geladen und ist damit Teil der Supply-Chain. Ohne Hash im Manifest
+        // würden wir sie nur auf Existenz prüfen — genau das soll nicht mehr
+        // passieren. Alte Manifeste (vor dieser Härtung) listen die Lib nicht:
+        // wir brechen NICHT hart (der Aufrufer degradiert L3 ohnehin graceful
+        // auf No-Op), signalisieren aber klar, dass ein Re-Download nötig ist.
+        anyhow::ensure!(
+            saw_native_lib,
+            "Manifest enthält keinen Hash für die ONNX-Runtime-Library ({native_lib}) — \
+             vermutlich ein altes Manifest vor der Lib-Hash-Härtung. Bitte das NER-Modell \
+             neu laden (Re-Download nötig)."
         );
         log::info!("ner: manifest verified ({} files)", entries);
         Ok(())
@@ -558,6 +632,105 @@ mod inference {
             confidence: conf,
         });
     }
+
+    // ------------------------------------------------------------ Tests (Manifest-Härtung)
+    #[cfg(test)]
+    mod manifest_tests {
+        use super::verify_manifest;
+        use sha2::{Digest, Sha256};
+        use std::path::{Path, PathBuf};
+
+        /// Legt ein isoliertes temporäres models/-Verzeichnis an.
+        fn temp_models_dir() -> PathBuf {
+            static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let dir = std::env::temp_dir().join(format!("streichzeug_manifest_test_{nanos}_{n}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir
+        }
+
+        fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> String {
+            std::fs::write(dir.join(name), bytes).unwrap();
+            hex::encode(Sha256::digest(bytes))
+        }
+
+        /// Schreibt model.onnx + tokenizer.json + native Lib mit korrekten
+        /// Hashes und gibt deren Hex-Hashes zurück (model, tokenizer, lib).
+        fn write_payload(dir: &Path) -> (String, String, String) {
+            let lib = super::super::native_lib_filename();
+            let model = write_file(dir, "model.onnx", b"fake-onnx-bytes");
+            let tok = write_file(dir, "tokenizer.json", b"{\"fake\":\"tokenizer\"}");
+            let libhash = write_file(dir, lib, b"fake-native-lib-bytes");
+            (model, tok, libhash)
+        }
+
+        /// Vollständiges, korrektes Manifest inkl. Lib-Hash → verifiziert.
+        #[test]
+        fn verify_ok_with_lib_hash() {
+            let dir = temp_models_dir();
+            let (model, tok, libhash) = write_payload(&dir);
+            let lib = super::super::native_lib_filename();
+            let manifest = dir.join("MANIFEST.sha256");
+            std::fs::write(
+                &manifest,
+                format!("# comment\n{model}  model.onnx\n{tok}  tokenizer.json\n{libhash}  {lib}\n"),
+            )
+            .unwrap();
+
+            let res = verify_manifest(&manifest, &dir);
+            assert!(res.is_ok(), "erwartete Ok, bekam: {res:?}");
+        }
+
+        /// Altes Manifest ohne Lib-Eintrag → Fehler, Hinweis auf Re-Download.
+        /// Kein Hard-Break: der Aufrufer degradiert L3 auf No-Op — hier prüfen
+        /// wir nur, dass klar als „Re-Download nötig" signalisiert wird.
+        #[test]
+        fn verify_fails_when_lib_hash_missing() {
+            let dir = temp_models_dir();
+            let (model, tok, _lib) = write_payload(&dir);
+            let manifest = dir.join("MANIFEST.sha256");
+            // Bewusst nur model + tokenizer, wie vor der Härtung.
+            std::fs::write(
+                &manifest,
+                format!("{model}  model.onnx\n{tok}  tokenizer.json\n"),
+            )
+            .unwrap();
+
+            let err = verify_manifest(&manifest, &dir).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("Re-Download"),
+                "Fehlermeldung sollte Re-Download nennen, war: {msg}"
+            );
+        }
+
+        /// Manipulierte native Lib (Hash im Manifest passt nicht) → Mismatch.
+        #[test]
+        fn verify_fails_on_lib_hash_mismatch() {
+            let dir = temp_models_dir();
+            let (model, tok, _libhash) = write_payload(&dir);
+            let lib = super::super::native_lib_filename();
+            let manifest = dir.join("MANIFEST.sha256");
+            // Falscher (aber wohlgeformter) Hash für die Lib.
+            let wrong = "0".repeat(64);
+            std::fs::write(
+                &manifest,
+                format!("{model}  model.onnx\n{tok}  tokenizer.json\n{wrong}  {lib}\n"),
+            )
+            .unwrap();
+
+            let err = verify_manifest(&manifest, &dir).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("mismatch"),
+                "Fehlermeldung sollte Mismatch nennen, war: {msg}"
+            );
+        }
+    }
 }
 
 // =================================================================== No-Op Impl (feature off)
@@ -604,9 +777,8 @@ mod tests {
     /// ```
     ///
     /// Erwartung auf typischer Office-CPU (Ryzen 7 / Apple M-Serie):
-    ///   - Cold-start (mit Modell-Load): 300–500 ms
-    ///   - Warm classify():               40–100 ms (p50)
-    ///                                   < 200 ms (p99)
+    /// - Cold-start (mit Modell-Load): 300–500 ms
+    /// - Warm classify(): 40–100 ms (p50), < 200 ms (p99)
     ///
     /// Wird mit `#[ignore]` versehen, weil:
     ///   1) ohne Modell-Files No-Op (uninteressant)
@@ -694,12 +866,7 @@ mod downloader {
 
     /// Filename der ORT-Shared-Library für die aktuelle Plattform.
     fn ort_lib_name() -> &'static str {
-        #[cfg(target_os = "macos")]
-        return "libonnxruntime.dylib";
-        #[cfg(target_os = "windows")]
-        return "onnxruntime.dll";
-        #[cfg(target_os = "linux")]
-        return "libonnxruntime.so";
+        super::native_lib_filename()
     }
 
     pub(super) async fn run() -> Result<PathBuf> {
@@ -832,7 +999,10 @@ mod downloader {
         let mut content = String::new();
         content.push_str("# Auto-generated by Streichzeug ner::downloader.\n");
         content.push_str("# Format: <sha256-hex>  <relative-path>\n");
-        for name in ["model.onnx", "tokenizer.json"] {
+        // Neben Modell + Tokenizer auch die native ORT-Library hashen: sie
+        // wird per ORT_DYLIB_PATH geladen und ist damit Teil der Supply-Chain.
+        // `verify_manifest` verlangt diesen Eintrag vor dem Laden.
+        for name in ["model.onnx", "tokenizer.json", ort_lib_name()] {
             let path = dir.join(name);
             let bytes = std::fs::read(&path)
                 .with_context(|| format!("read {} for manifest", path.display()))?;

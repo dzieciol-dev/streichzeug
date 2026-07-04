@@ -160,9 +160,34 @@ static RE_CREDIT_CARD_CANDIDATE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b(?:\d[ -]?){13,19}\b").unwrap());
 
 /// Deutsche Steuer-ID-Kandidaten: 11 zusammenhängende Ziffern.
-/// Validiert wird die ISO-7064-MOD-11,10-Prüfsumme in [`steuer_id_check`].
+///
+/// Die reine Form (11 Ziffern) ist als Kandidaten-Gate viel zu weit: jede
+/// 11-stellige Zahl (Bestell-, Vorgangs-, Kundennummer) fällt hier rein, und
+/// grob **1 von 10** solcher Zufallszahlen besteht die ISO-7064-Prüfsumme
+/// zufällig. Deshalb reicht die Prüfsumme allein nicht — [`collect_steuer_ids`]
+/// verlangt zusätzlich ein **Kontextwort** in der Nähe (Steuer-ID/IdNr/…) und
+/// [`steuer_id_check`] prüft die formalen Strukturregeln (führende Ziffer ≠ 0,
+/// genau eine Ziffer doppelt/dreifach) vollständig.
 static RE_STEUER_ID_CANDIDATE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\b\d{11}\b").unwrap());
+
+/// Kontextwörter, die eine 11-stellige Zahl als Steuer-ID plausibilisieren.
+/// Alle lowercase — der Abgleich passiert gegen einen kleingeschriebenen
+/// Textausschnitt vor dem Kandidaten. Bewusst ohne „Steuernummer" (das ist
+/// ein anderes, meist 10-/13-stelliges Format).
+const STEUER_ID_CONTEXT_KEYWORDS: &[&str] = &[
+    "steuer-id",
+    "steuerid",
+    "steuer id",
+    "steuer-identifikationsnummer",
+    "steuerliche identifikationsnummer",
+    "steuerliche id",
+    "identifikationsnummer",
+    "idnr",
+    "id-nr",
+    "id.-nr",
+    "tin",
+];
 
 /// Datum im deutschen `DD.MM.YYYY`-Format. Tag 01–31, Monat 01–12, Jahr
 /// 19xx/20xx — nur Form-Check, **kein** echter Kalender-Check (30.02.2024
@@ -521,6 +546,27 @@ fn letter_for_index(mut n: usize) -> String {
 // einzelnen Implementierungen sind klein genug, dass die Indirektion mehr
 // Verständnis-Cost als Wartungs-Gewinn brächte.
 
+/// Generischer Collector für **reine Regex-Match-Collectors** — also solche,
+/// die jeden Volltreffer der Regex ohne Zusatz-Validierung oder Capture-Group-
+/// Logik als Finding übernehmen (Email, Datum, USt-IdNr, BIC, URL, Straße).
+///
+/// Bewusst eine freie Funktion statt eines `Recognizer`-Traits: die Collectors
+/// unterscheiden sich nur in Regex, Entity-Type und Confidence — ein
+/// Trait-Objekt brächte hier nur Indirektion ohne Gewinn. Collectors mit
+/// Capture-Groups, Prüfsummen oder Gazetteer-Lookup bleiben eigenständig.
+fn collect_regex_matches(
+    text: &str,
+    out: &mut Vec<Finding>,
+    re: &Regex,
+    entity_type: EntityType,
+    confidence: f32,
+    secret: &[u8],
+) {
+    for m in re.find_iter(text) {
+        push_finding(out, entity_type, m.as_str(), m.start(), m.end(), confidence, secret);
+    }
+}
+
 /// Erzeugt aus den Match-Daten ein [`Finding`] und appended es. Reduziert
 /// Boilerplate in den Collectors.
 fn push_finding(
@@ -546,9 +592,7 @@ fn push_finding(
 
 /// Email — Pattern-Match, keine MX-Verifikation.
 fn collect_emails(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
-    for m in RE_EMAIL.find_iter(text) {
-        push_finding(out, EntityType::Email, m.as_str(), m.start(), m.end(), 0.99, secret);
-    }
+    collect_regex_matches(text, out, &RE_EMAIL, EntityType::Email, 0.99, secret);
 }
 
 /// Telefon — Pattern-Match + Ziffernzahl-Sanity (6–16). Capture-Group 1
@@ -591,10 +635,20 @@ fn collect_credit_cards(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
     }
 }
 
-/// Deutsche Steuer-ID — Form-Match + ISO-7064-MOD-11,10-Prüfsumme.
+/// Deutsche Steuer-ID — Form-Match + Kontextwort + formale Strukturprüfung.
+///
+/// Zwei Gates gegen False Positives auf harmlose 11-stellige Zahlen:
+/// 1. **Kontextwort** (Steuer-ID/IdNr/…) muss kurz vor dem Kandidaten stehen —
+///    ohne diesen Kontext ist die Prüfsumme allein zu schwach (~1:10 Zufalls-
+///    treffer).
+/// 2. [`steuer_id_check`] verifiziert die formalen Strukturregeln **und** die
+///    ISO-7064-MOD-11,10-Prüfsumme.
 fn collect_steuer_ids(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
     for m in RE_STEUER_ID_CANDIDATE.find_iter(text) {
         let candidate = m.as_str();
+        if !has_steuer_id_context(text, m.start()) {
+            continue;
+        }
         if !steuer_id_check(candidate) {
             continue;
         }
@@ -602,11 +656,27 @@ fn collect_steuer_ids(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
     }
 }
 
+/// Prüft, ob eines der [`STEUER_ID_CONTEXT_KEYWORDS`] in einem Fenster von
+/// ~40 Zeichen **vor** dem Kandidaten (Byte-Offset `at`) steht. Das Fenster
+/// wird auf einer Zeichen-Grenze abgeschnitten und kleingeschrieben verglichen.
+fn has_steuer_id_context(text: &str, at: usize) -> bool {
+    const WINDOW_CHARS: usize = 40;
+    // Byte-Index der frühesten der letzten WINDOW_CHARS Zeichen vor `at`.
+    let prefix = &text[..at];
+    let window_start = prefix
+        .char_indices()
+        .rev()
+        .take(WINDOW_CHARS)
+        .last()
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let window = prefix[window_start..].to_lowercase();
+    STEUER_ID_CONTEXT_KEYWORDS.iter().any(|kw| window.contains(kw))
+}
+
 /// Datum — reines Format-Match, kein Kalender-Plausibilitäts-Check.
 fn collect_dates(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
-    for m in RE_DATE.find_iter(text) {
-        push_finding(out, EntityType::Date, m.as_str(), m.start(), m.end(), 0.80, secret);
-    }
+    collect_regex_matches(text, out, &RE_DATE, EntityType::Date, 0.80, secret);
 }
 
 /// L2 — Personen via Gazetteer.
@@ -628,34 +698,14 @@ fn collect_persons(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
 /// Format DE + 9 Ziffern, verwendet als Entity-Type SteuerId (gleiche Kategorie
 /// wie die normale Steuer-Identifikationsnummer aus User-Sicht).
 fn collect_vat_ids(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
-    for m in RE_VAT_ID.find_iter(text) {
-        push_finding(
-            out,
-            EntityType::SteuerId,
-            m.as_str(),
-            m.start(),
-            m.end(),
-            0.99,
-            secret,
-        );
-    }
+    collect_regex_matches(text, out, &RE_VAT_ID, EntityType::SteuerId, 0.99, secret);
 }
 
 /// L1 — BIC (SWIFT-Code für Banküberweisungen). Behandelt als Entity-Type
 /// Iban, weil's in derselben Bank-Kategorie liegt und der Token-Buchstabe
 /// `B` aussagekräftig bleibt.
 fn collect_bics(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
-    for m in RE_BIC.find_iter(text) {
-        push_finding(
-            out,
-            EntityType::Iban,
-            m.as_str(),
-            m.start(),
-            m.end(),
-            0.95,
-            secret,
-        );
-    }
+    collect_regex_matches(text, out, &RE_BIC, EntityType::Iban, 0.95, secret);
 }
 
 /// L1 — URLs und nackte Hostnames (`https://…`, `http://…`, `www.…`).
@@ -663,11 +713,9 @@ fn collect_bics(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
 /// regionale Sparkasse, persönliche Homepage) und werden daher als PII
 /// behandelt.
 fn collect_urls(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
-    for m in RE_URL.find_iter(text) {
-        // Email-Adressen enthalten `@`, das matcht unser Pattern nicht —
-        // also keine Konflikte mit `collect_emails`.
-        push_finding(out, EntityType::Url, m.as_str(), m.start(), m.end(), 0.95, secret);
-    }
+    // Email-Adressen enthalten `@`, das matcht unser Pattern nicht —
+    // also keine Konflikte mit `collect_emails`.
+    collect_regex_matches(text, out, &RE_URL, EntityType::Url, 0.95, secret);
 }
 
 /// L2 — Postleitzahl + Stadt-Pattern. Wir tokenisieren nur die PLZ-Ziffern
@@ -692,17 +740,7 @@ fn collect_postal_codes(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
 /// etc.; reine Eigennamen-Straßen ohne Suffix („Freistuhl") werden nicht
 /// erfasst (zu hohe False-Positive-Rate).
 fn collect_streets(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
-    for m in RE_STREET.find_iter(text) {
-        push_finding(
-            out,
-            EntityType::Location,
-            m.as_str(),
-            m.start(),
-            m.end(),
-            0.85,
-            secret,
-        );
-    }
+    collect_regex_matches(text, out, &RE_STREET, EntityType::Location, 0.85, secret);
 }
 
 /// L2b' — Outlook-Adressbuch-Konvention „Nachname, Vorname".
@@ -860,13 +898,19 @@ fn luhn_check(digits: &str) -> bool {
 
 /// Prüfsumme der deutschen Steuer-ID (BMF-Spezifikation).
 ///
-/// Zwei Bedingungen:
-/// 1. Genau **eine** der ersten 10 Ziffern kommt 2- oder 3-mal vor; alle
+/// Drei Bedingungen:
+/// 1. Die **erste Ziffer darf nicht 0 sein** (formale Vorgabe der IdNr).
+/// 2. Genau **eine** der ersten 10 Ziffern kommt 2- oder 3-mal vor; alle
 ///    anderen 0- oder 1-mal.
-/// 2. Iteratives ISO-7064-MOD-11,10-Verfahren über die ersten 10 Ziffern
+/// 3. Iteratives ISO-7064-MOD-11,10-Verfahren über die ersten 10 Ziffern
 ///    liefert die elfte (Prüf-)Ziffer.
 fn steuer_id_check(id: &str) -> bool {
     if id.len() != 11 || !id.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    // Formale Vorgabe: die IdNr beginnt nie mit 0.
+    if id.starts_with('0') {
         return false;
     }
 
@@ -1059,6 +1103,61 @@ mod tests {
             orgs.iter().any(|o| o.original.contains("AG")),
             "expected AG org in {:?}",
             orgs
+        );
+    }
+
+    #[test]
+    fn detects_steuer_id_with_context() {
+        // Gültige Test-IdNr (korrekte Prüfziffer + Struktur) mit Kontextwort.
+        let f = detect("Meine Steuer-ID: 86095742719, bitte notieren.");
+        assert!(
+            f.iter().any(|x| x.entity_type == "steuer_id" && x.original == "86095742719"),
+            "expected Steuer-ID 86095742719 in {f:?}"
+        );
+    }
+
+    #[test]
+    fn steuer_id_without_context_is_ignored() {
+        // Dieselbe prüfsummen-gültige Zahl OHNE Kontextwort — eine harmlose
+        // Bestellnummer. Darf NICHT als Steuer-ID pseudonymisiert werden.
+        let f = detect("Bestellnummer 86095742719 wurde versandt.");
+        assert!(
+            !f.iter().any(|x| x.entity_type == "steuer_id"),
+            "harmless 11-digit order number must not be flagged as Steuer-ID: {f:?}"
+        );
+    }
+
+    #[test]
+    fn steuer_id_context_variants() {
+        // Verschiedene Kontext-Schreibweisen greifen.
+        for ctx in ["IdNr. 86095742719", "Identifikationsnummer 86095742719", "steuerid 86095742719"] {
+            let f = detect(ctx);
+            assert!(
+                f.iter().any(|x| x.entity_type == "steuer_id"),
+                "expected Steuer-ID for context {ctx:?}, got {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn steuer_id_check_validates_structure_and_checksum() {
+        // Gültig: korrekte Prüfziffer, erste Ziffer ≠ 0, genau eine Ziffer doppelt.
+        assert!(steuer_id_check("86095742719"));
+        // Falsche Prüfziffer.
+        assert!(!steuer_id_check("86095742718"));
+        // Führende 0 ist formal unzulässig.
+        assert!(!steuer_id_check("06095742719"));
+        // Falsche Länge.
+        assert!(!steuer_id_check("8609574271"));
+    }
+
+    #[test]
+    fn steuer_id_with_leading_zero_rejected_even_with_context() {
+        // Formale Regel schlägt zu, selbst wenn ein Kontextwort danebensteht.
+        let f = detect("Steuer-ID 01234567890 (Tippfehler)");
+        assert!(
+            !f.iter().any(|x| x.entity_type == "steuer_id"),
+            "IdNr with leading zero must be rejected: {f:?}"
         );
     }
 

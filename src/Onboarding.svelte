@@ -109,6 +109,12 @@
             die LLM-Antwort zurückübersetzen. Tokens beim LLM sind
             pseudonyme (= personenbezogene) Daten — DSGVO-Pflichten bleiben.
           </p>
+          <p class="opt-caution">
+            Ehrlich dazu: Die Mapping-DB liegt aktuell <strong>unverschlüsselt</strong>
+            lokal auf der Platte (Klartext, kein Encryption-at-Rest). Wer
+            Zugriff auf deinen Rechner hat, kann sie lesen. Willst du keinerlei
+            lokales Klartext-Mapping, nimm Strict.
+          </p>
         </div>
       </label>
       <label class="option" class:selected={draft.strict_mode}>
@@ -248,6 +254,7 @@
   .opt-label { font-weight: 600; }
   .opt-tag { display: inline-block; margin-left: 6px; font-size: 11px; background: #2563eb; color: white; padding: 1px 6px; border-radius: 3px; vertical-align: middle; }
   .opt-hint { font-size: 13px; color: #666; margin: 4px 0 0; }
+  .opt-caution { font-size: 12px; color: #92400e; background: #fffbeb; border-left: 3px solid #f59e0b; padding: 6px 10px; border-radius: 3px; margin: 8px 0 0; }
   .info-box { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 12px 16px; margin: 12px 0; }
   .info-box ul { margin: 6px 0; padding-left: 20px; }
   .info-box li { margin: 4px 0; font-size: 13px; }

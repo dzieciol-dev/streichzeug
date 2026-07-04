@@ -936,9 +936,7 @@ mod downloader {
     }
 
     /// Entpackt die ORT-Shared-Library aus dem heruntergeladenen Archive.
-    /// macOS/Linux: .tgz mit tar+gzip. Windows: .zip (Deflate) via `zip`-Crate.
-    /// In beiden Fällen wird gezielt der Eintrag mit dem passenden Dateinamen
-    /// ([`ort_lib_name`]) gesucht und in `target` geschrieben.
+    /// macOS/Linux: .tgz mit tar+gzip. Windows: .zip mit dem `zip`-Crate.
     fn extract_ort_lib(archive: &std::path::Path, target: &std::path::Path) -> Result<()> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -959,30 +957,36 @@ mod downloader {
         }
         #[cfg(target_os = "windows")]
         {
+            use std::io::copy;
+
             let file = std::fs::File::open(archive)
                 .with_context(|| format!("open archive {}", archive.display()))?;
             let mut zip = zip::ZipArchive::new(file)
-                .with_context(|| format!("zip open {}", archive.display()))?;
+                .with_context(|| format!("zip parse {}", archive.display()))?;
+            let needle = ort_lib_name();
             for i in 0..zip.len() {
-                let mut entry = zip.by_index(i).with_context(|| format!("zip entry {i}"))?;
-                // Zip-Pfade nutzen '/' als Trenner; nur der Dateiname zählt.
-                // `enclosed_name` filtert Zip-Slip-Pfade (../) defensiv aus.
-                let is_lib = entry
-                    .enclosed_name()
-                    .as_deref()
-                    .and_then(|p| p.file_name())
-                    .and_then(|n| n.to_str())
-                    == Some(ort_lib_name());
-                if is_lib {
-                    let mut out = std::fs::File::create(target)
-                        .with_context(|| format!("create {}", target.display()))?;
-                    std::io::copy(&mut entry, &mut out)
-                        .with_context(|| format!("extract {}", target.display()))?;
+                let mut entry = zip.by_index(i).context("zip entry")?;
+                // Zip-Einträge verwenden Forward-Slashes — nach dem letzten
+                // Slash splitten, statt Path::file_name (das Backslashes
+                // erwartet, wenn der Slash nicht als Separator durchgereicht
+                // wird).
+                let entry_name = entry.name().to_owned();
+                let base = entry_name.rsplit('/').next().unwrap_or(&entry_name);
+                if base == needle {
+                    let mut out = std::fs::File::create(target).with_context(|| {
+                        format!("create target {}", target.display())
+                    })?;
+                    copy(&mut entry, &mut out).with_context(|| {
+                        format!("extract {entry_name} → {}", target.display())
+                    })?;
                     log::info!("ner download: extracted {}", target.display());
                     return Ok(());
                 }
             }
-            anyhow::bail!("ORT-Shared-Library ({}) nicht in Zip-Archive gefunden", ort_lib_name());
+            anyhow::bail!(
+                "ORT-Shared-Library {needle} nicht in Archive {} gefunden",
+                archive.display()
+            );
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {

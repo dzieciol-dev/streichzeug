@@ -32,10 +32,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: "22"
           cache: "npm"
@@ -75,6 +75,19 @@ jobs:
             - **macOS Intel**: `Streichzeug_*_x64.dmg`
             - **Windows 10/11**: `Streichzeug_*_x64-setup.exe` oder `Streichzeug_*_x64_en-US.msi`
 
+            ### ⚠️ Windows: SmartScreen-Warnung beim ersten Start
+
+            Der Installer ist aktuell **nicht** Code-signiert. Windows
+            Defender SmartScreen zeigt deshalb beim Doppelklick
+            „Der Computer wurde durch Windows geschützt". Behebung:
+
+            1. Auf **„Weitere Informationen"** klicken.
+            2. Dann erscheint der Button **„Trotzdem ausführen"** —
+               diesen klicken.
+
+            Sobald wir Code-Signing eingerichtet haben, ist der Schritt
+            nicht mehr nötig.
+
             ### ⚠️ macOS: „App ist beschädigt"-Fehler
 
             Die Bundles sind aktuell **nicht** Apple-Developer-signiert
@@ -88,6 +101,12 @@ jobs:
             Danach App über Launchpad oder Finder starten — der Hinweis
             bleibt aus. Sobald wir Code-Signing eingerichtet haben, ist
             der Schritt nicht mehr nötig.
+
+            **Alternativ** über Homebrew, kein xattr-Schritt nötig:
+
+            ```bash
+            brew install --cask dzieciol-dev/streichzeug/streichzeug
+            ```
 
             ### NER-Modell
 

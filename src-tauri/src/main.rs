@@ -253,6 +253,30 @@ fn main() {
             clear_all_mappings,
         ])
         .setup(move |app| {
+            // ----------------------------------- Master-Secret prüfen
+            // Erzwingt die Init des HMAC-Master-Secrets. Konnte es nicht
+            // persistiert werden, läuft die App mit einem pro Start neu
+            // zufälligen Secret — dann sind **alle bisherigen Tokens für
+            // immer unlesbar**. Das darf nicht still passieren: einmalige
+            // Warnung an den Nutzer (Fehler-Kanal, unabhängig von
+            // enable_notifications).
+            if secrets::init() {
+                log::error!(
+                    "master secret ephemeral fallback active — bestehende Tokens sind nicht mehr rückübersetzbar"
+                );
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("Streichzeug — Schlüssel nicht gespeichert")
+                    .body(
+                        "Der Verschlüsselungs-Schlüssel konnte nicht gespeichert werden. \
+Diese Sitzung nutzt einen temporären Schlüssel: bereits pseudonymisierte Texte lassen \
+sich nicht mehr zurückübersetzen, und neue Pseudonyme gelten nur bis zum Beenden der App. \
+Bitte Schreibrechte im App-Datenverzeichnis prüfen und die App neu starten.",
+                    )
+                    .show();
+            }
+
             // ----------------------------------- macOS: Accessory-Policy
             // Kein Dock-Icon, kein Eintrag in Cmd+Tab — die App lebt nur
             // im Menubar-Tray (wie 1Password). Auf anderen Plattformen ist
@@ -329,6 +353,12 @@ fn main() {
             {
                 tray_builder = tray_builder.icon_as_template(true);
             }
+            // Clones für den Menü-Callback: bei einem Speicher-Fehler setzen
+            // wir den Haken wieder auf den tatsächlich persistierten Wert
+            // zurück, damit die UI nicht einen nicht-gespeicherten Zustand
+            // vorgaukelt.
+            let auto_item_cb = auto_item.clone();
+            let ner_item_cb = ner_item.clone();
             let _tray = tray_builder
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => {
@@ -343,42 +373,71 @@ fn main() {
                         // Persistieren, User-Hinweis dass Restart nötig ist.
                         let mut s = Settings::load();
                         s.auto_detection = !s.auto_detection;
-                        if let Err(e) = s.save() {
-                            log::warn!("settings save failed: {e}");
-                        }
                         let state_label = if s.auto_detection {
                             "aktiviert"
                         } else {
                             "deaktiviert"
                         };
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("Streichzeug")
-                            .body(format!(
-                                "Auto-Detection {state_label}. Bitte App neu starten, damit es greift."
-                            ))
-                            .show();
+                        match s.save() {
+                            Ok(()) => {
+                                let _ = app
+                                    .notification()
+                                    .builder()
+                                    .title("Streichzeug")
+                                    .body(format!(
+                                        "Auto-Detection {state_label}. Bitte App neu starten, damit es greift."
+                                    ))
+                                    .show();
+                            }
+                            Err(e) => {
+                                // Speichern fehlgeschlagen: Haken zurück auf
+                                // den alten (persistierten) Wert und Fehler
+                                // sichtbar machen, statt Erfolg vorzugaukeln.
+                                log::error!("settings save failed (toggle_auto): {e}");
+                                let _ = auto_item_cb.set_checked(!s.auto_detection);
+                                let _ = app
+                                    .notification()
+                                    .builder()
+                                    .title("Streichzeug — nicht gespeichert")
+                                    .body(format!(
+                                        "Auto-Detection konnte nicht gespeichert werden: {e}. Die Einstellung wurde nicht übernommen."
+                                    ))
+                                    .show();
+                            }
+                        }
                     }
                     "toggle_ner" => {
                         let mut s = Settings::load();
                         s.enable_ner = !s.enable_ner;
-                        if let Err(e) = s.save() {
-                            log::warn!("settings save failed: {e}");
-                        }
                         let state_label = if s.enable_ner {
                             "aktiviert"
                         } else {
                             "deaktiviert"
                         };
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("Streichzeug")
-                            .body(format!(
-                                "Erweiterte Erkennung {state_label}. Bitte App neu starten, damit es greift."
-                            ))
-                            .show();
+                        match s.save() {
+                            Ok(()) => {
+                                let _ = app
+                                    .notification()
+                                    .builder()
+                                    .title("Streichzeug")
+                                    .body(format!(
+                                        "Erweiterte Erkennung {state_label}. Bitte App neu starten, damit es greift."
+                                    ))
+                                    .show();
+                            }
+                            Err(e) => {
+                                log::error!("settings save failed (toggle_ner): {e}");
+                                let _ = ner_item_cb.set_checked(!s.enable_ner);
+                                let _ = app
+                                    .notification()
+                                    .builder()
+                                    .title("Streichzeug — nicht gespeichert")
+                                    .body(format!(
+                                        "Erweiterte Erkennung konnte nicht gespeichert werden: {e}. Die Einstellung wurde nicht übernommen."
+                                    ))
+                                    .show();
+                            }
+                        }
                     }
                     _ => {}
                 })

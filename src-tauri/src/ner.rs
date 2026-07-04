@@ -605,8 +605,7 @@ mod tests {
     ///
     /// Erwartung auf typischer Office-CPU (Ryzen 7 / Apple M-Serie):
     ///   - Cold-start (mit Modell-Load): 300–500 ms
-    ///   - Warm classify():               40–100 ms (p50)
-    ///                                   < 200 ms (p99)
+    ///   - Warm classify(): 40–100 ms (p50), < 200 ms (p99)
     ///
     /// Wird mit `#[ignore]` versehen, weil:
     ///   1) ohne Modell-Files No-Op (uninteressant)

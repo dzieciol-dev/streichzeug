@@ -42,6 +42,11 @@
   let storageStatus: StorageStatus = { mapping_count: 0, retention_minutes: 60 };
   let purgeStatus = "";
   let initialized = false;
+  // Sichtbare Fehlermeldung, wenn eine Einstellung nicht gespeichert werden
+  // konnte. Ohne das glaubt der Nutzer an einen Zustand, der nie persistiert
+  // wurde. Wird von allen Settings-Handlern gesetzt und beim nächsten
+  // erfolgreichen Speichern wieder geleert.
+  let saveError = "";
 
   // Onboarding-Done-Handler: nochmal alle Settings laden, dann Wizard ausblenden
   async function onOnboardingDone() {
@@ -95,8 +100,13 @@
       });
       settings = { ...settings, retention_minutes: newValue };
       storageStatus = { ...storageStatus, retention_minutes: newValue };
+      saveError = "";
     } catch (e) {
       console.error("retention change failed", e);
+      // Nicht gespeichert: Select-Auswahl auf den echten Wert zurücksetzen
+      // (Reassign erzwingt das Re-Rendern) und Fehler sichtbar machen.
+      settings = { ...settings };
+      saveError = `Aufbewahrungsdauer konnte nicht gespeichert werden: ${e}`;
     }
   }
 
@@ -112,8 +122,12 @@
         newSettings: { ...settings, strict_mode: strict }
       });
       settings = { ...settings, strict_mode: strict };
+      saveError = "";
     } catch (e) {
       console.error("mode change failed", e);
+      // Radio-Auswahl auf den echten Wert zurücksetzen und Fehler zeigen.
+      settings = { ...settings };
+      saveError = `Verarbeitungsmodus konnte nicht gespeichert werden: ${e}`;
     }
   }
 
@@ -184,8 +198,12 @@
         newSettings: { ...settings, enable_notifications: checked }
       });
       settings = { ...settings, enable_notifications: checked };
+      saveError = "";
     } catch (err) {
       console.error("toggle notifications failed", err);
+      // Checkbox auf den echten Wert zurücksetzen und Fehler zeigen.
+      settings = { ...settings };
+      saveError = `Benachrichtigungs-Einstellung konnte nicht gespeichert werden: ${err}`;
     }
   }
 
@@ -241,6 +259,12 @@
       durch reversible Pseudonyme — bevor du sie an einen LLM-Chat schickst.
     </p>
   </header>
+
+  {#if saveError}
+    <div class="save-error" role="alert">
+      <strong>Nicht gespeichert.</strong> {saveError}
+    </div>
+  {/if}
 
   <section class="card">
     <h2>So nutzt du die App</h2>
@@ -467,6 +491,7 @@
   header h1 { margin: 0 0 4px; font-size: 22px; }
   .badge { font-size: 11px; padding: 2px 6px; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 4px; vertical-align: middle; margin-left: 6px; }
   .sub { color: #6b7280; margin: 0 0 24px; }
+  .save-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.4; }
   .card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 16px; }
   .usage { font-size: 15px; line-height: 1.5; }

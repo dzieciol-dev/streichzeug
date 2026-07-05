@@ -23,11 +23,18 @@
 //! `object_setClass` auf eine Klasse ohne zusätzliche Ivars (NSPanel fügt
 //! gegenüber NSWindow keine hinzu) ist derselbe erprobte Trick wie im Plugin.
 //!
+//! # Mechanik (Windows)
+//!
+//! Dasselbe Ziel, anderes Werkzeug: Am Raw-HWND wird der Extended-Style um
+//! `WS_EX_NOACTIVATE` ergänzt — Klicks aktivieren das Fenster nicht, die
+//! Ziel-App behält Fokus und Markierung. `WS_EX_TOOLWINDOW` hält es
+//! zusätzlich aus Alt+Tab heraus (skip_taskbar deckt nur die Taskbar ab).
+//! Transparenz kommt hier direkt von Tauri (`.transparent(true)` — das
+//! Private-API-Gate gilt nur auf macOS).
+//!
 //! # Andere Plattformen
 //!
-//! Windows bräuchte `WS_EX_NOACTIVATE` über das Raw-HWND — noch nicht
-//! umgesetzt, das Widget bleibt dort deaktiviert (Setting wird ignoriert,
-//! nur geloggt). Linux: kein Watcher, kein Widget.
+//! Linux: kein Watcher, kein Widget (Setting wird ignoriert, nur geloggt).
 
 use std::sync::Mutex;
 
@@ -40,9 +47,9 @@ use crate::settings::Settings;
 pub const WIDGET_LABEL: &str = "widget";
 
 /// Kantenlänge des quadratischen Widget-Fensters (logische Pixel).
-/// Nur macOS — das Fenster wird nur dort erzeugt, auf anderen Plattformen
-/// wäre die Konstante unused (CI verbietet Warnings).
-#[cfg(target_os = "macos")]
+/// Nur auf Plattformen mit Widget-Implementierung — sonst wäre die
+/// Konstante unused (CI verbietet Warnings).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const WIDGET_SIZE: f64 = 56.0;
 
 /// Zuletzt beobachtete Fensterposition (logische Pixel). Wird bei jedem
@@ -62,11 +69,17 @@ pub fn init(app: &AppHandle, cfg: &Settings) {
             log::warn!("widget: Initialisierung fehlgeschlagen ({e}) — Widget aus");
         }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        if let Err(e) = init_windows(app, cfg) {
+            log::warn!("widget: Initialisierung fehlgeschlagen ({e}) — Widget aus");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = app;
         if cfg.show_widget {
-            log::info!("widget: auf dieser Plattform noch nicht verfügbar (nur macOS)");
+            log::info!("widget: auf dieser Plattform nicht verfügbar (macOS/Windows)");
         }
     }
 }
@@ -75,7 +88,7 @@ pub fn init(app: &AppHandle, cfg: &Settings) {
 /// Plattform nicht existiert.
 pub fn set_visible(app: &AppHandle, visible: bool) -> Result<(), String> {
     let Some(window) = app.get_webview_window(WIDGET_LABEL) else {
-        return Err("Widget ist auf dieser Plattform nicht verfügbar (nur macOS)".into());
+        return Err("Widget ist auf dieser Plattform nicht verfügbar (macOS/Windows)".into());
     };
     let result = if visible {
         window.show()
@@ -99,6 +112,96 @@ pub fn persist_position() {
     if let Err(e) = s.save() {
         log::warn!("widget: Position nicht gespeichert: {e}");
     }
+}
+
+/// Windows-Pendant zu [`init_macos`]: reguläres Tauri-Fenster, danach wird
+/// der Extended-Style am Raw-HWND um `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`
+/// ergänzt. Klicks aktivieren das Fenster damit nicht — die Markierung der
+/// Quell-App bleibt bestehen und der volle Capture-Flow (synthetisches
+/// Strg+C) funktioniert wie beim macOS-Panel.
+#[cfg(target_os = "windows")]
+fn init_windows(app: &AppHandle, cfg: &Settings) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+    let mut builder = WebviewWindowBuilder::new(
+        app,
+        WIDGET_LABEL,
+        WebviewUrl::App("index.html?widget=1".into()),
+    )
+    .title("Streichzeug")
+    .inner_size(WIDGET_SIZE, WIDGET_SIZE)
+    .resizable(false)
+    .decorations(false)
+    // Anders als macOS braucht Windows kein Private-API-Feature für
+    // Fenster-Transparenz — die runde Form kommt aus dem Widget-CSS.
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .visible(false)
+    .accept_first_mouse(true)
+    .shadow(false);
+
+    if let Some((x, y)) = cfg.widget_position {
+        builder = builder.position(x, y);
+    }
+
+    let window = builder.build().map_err(|e| e.to_string())?;
+
+    apply_noactivate_style(&window)?;
+
+    // Position für den nächsten Start merken (Schreiben erst am Exit).
+    window.on_window_event(move |event| {
+        if let WindowEvent::Moved(pos) = event {
+            let logical = pos.to_logical::<f64>(1.0);
+            *LAST_POSITION.lock().expect("widget position lock") = Some((logical.x, logical.y));
+        }
+    });
+
+    if cfg.show_widget {
+        let _ = window.show();
+    }
+    log::info!(
+        "widget: initialisiert (sichtbar={}, position={:?})",
+        cfg.show_widget,
+        cfg.widget_position
+    );
+    Ok(())
+}
+
+/// Setzt `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` am Raw-HWND.
+///
+/// - `WS_EX_NOACTIVATE`: Maus-Klicks aktivieren das Fenster nicht — das
+///   Windows-Gegenstück zur `nonactivatingPanel`-Mask des NSPanel.
+/// - `WS_EX_TOOLWINDOW`: hält das Widget aus Alt+Tab heraus;
+///   `skip_taskbar` deckt nur die Taskbar-Schaltfläche ab.
+///
+/// Tauris `hwnd()` liefert den HWND-Typ seiner eigenen windows-Crate-Version;
+/// über den rohen Pointer (`.0`) wird er in unsere Version überführt —
+/// beide sind `#[repr(transparent)]` über `*mut c_void`.
+#[cfg(target_os = "windows")]
+fn apply_noactivate_style(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    };
+
+    let raw = window.hwnd().map_err(|e| e.to_string())?.0;
+    let hwnd = HWND(raw);
+
+    // SAFETY: hwnd stammt aus einem frisch gebauten, lebenden Tauri-Fenster;
+    // Get/SetWindowLongPtrW auf GWL_EXSTYLE sind für eigene Fenster des
+    // Prozesses dokumentiert sicher.
+    unsafe {
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let new_style =
+            ex_style | (WS_EX_NOACTIVATE.0 as isize) | (WS_EX_TOOLWINDOW.0 as isize);
+        if SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new_style) == 0 && ex_style != 0 {
+            // Rückgabe 0 kann „vorheriger Wert war 0" ODER Fehler bedeuten —
+            // nur im eindeutigen Fehlerfall abbrechen.
+            return Err("SetWindowLongPtrW(GWL_EXSTYLE) fehlgeschlagen".into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

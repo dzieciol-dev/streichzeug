@@ -113,8 +113,7 @@ pub fn write_clipboard_text(text: &str) -> Result<(), String> {
     {
         // SAFETY: write_text macht clearContents + setString — kein Aliasing,
         // kein Lifetime-Trick.
-        unsafe { macos_impl::write_text(text) };
-        Ok(())
+        unsafe { macos_impl::write_text(text) }
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
@@ -158,8 +157,7 @@ pub fn write_clipboard_html(html: &str, text_fallback: &str) -> Result<(), Strin
     #[cfg(target_os = "macos")]
     {
         // SAFETY: clearContents + zweimal setString — kein Aliasing.
-        unsafe { macos_impl::write_html(html, text_fallback) };
-        Ok(())
+        unsafe { macos_impl::write_html(html, text_fallback) }
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {

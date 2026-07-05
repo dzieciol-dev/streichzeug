@@ -240,23 +240,33 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         "#,
     )?;
-    migrate_stash_rich_columns(conn);
+    migrate_stash_rich_columns(conn)?;
     Ok(())
 }
 
 /// Idempotente Migration für Bestands-DBs aus Stufe 1: ergänzt die beiden
-/// Stufe-2-Spalten. `ALTER TABLE ADD COLUMN` schlägt fehl, wenn die Spalte
-/// schon existiert (frische DB über das CREATE oben, oder zweiter Lauf) —
-/// dieser Fehler ist der Normalfall und wird bewusst verschluckt.
-fn migrate_stash_rich_columns(conn: &Connection) {
+/// Stufe-2-Spalten. `ALTER TABLE ADD COLUMN` schlägt mit „duplicate column
+/// name" fehl, wenn die Spalte schon existiert (frische DB über das CREATE
+/// oben, oder zweiter Lauf) — NUR dieser Fall ist der harmlose Normalfall.
+/// Jeder andere Fehler (DB gelockt, read-only Volume) wird propagiert und
+/// bricht wie jeder andere Schema-Fehler den Start ab: eine still
+/// halb-migrierte Tabelle ließe sonst jede Ablage-Operation dauerhaft
+/// scheitern (stash_list-Prepare referenziert die neuen Spalten), ohne dass
+/// der User je einen Fehler sieht.
+fn migrate_stash_rich_columns(conn: &Connection) -> rusqlite::Result<()> {
     for ddl in [
         "ALTER TABLE stash ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'plain'",
         "ALTER TABLE stash ADD COLUMN redacted_html TEXT",
     ] {
-        if let Err(e) = conn.execute(ddl, []) {
-            log::debug!("storage: stash-Migration übersprungen ({e})");
+        match conn.execute(ddl, []) {
+            Ok(_) => {}
+            Err(e) if e.to_string().contains("duplicate column name") => {
+                log::debug!("storage: stash-Spalte existiert bereits ({e})");
+            }
+            Err(e) => return Err(e),
         }
     }
+    Ok(())
 }
 
 // =================================================================== Public API

@@ -73,11 +73,14 @@ impl ClipboardWatcher for MacosClipboardWatcher {
                             );
                             // Callback liefert ggf. Ersatztext → Auto-Replace.
                             if let Some(replacement) = callback(t) {
-                                unsafe { write_text(&replacement) };
-                                // Nach dem Write hat sich changeCount erhöht.
-                                // Diesen neuen Stand als verarbeitet merken,
-                                // sonst feuert der nächste Tick wegen unseres
-                                // eigenen Writes.
+                                if let Err(e) = unsafe { write_text(&replacement) } {
+                                    log::warn!("clipboard auto-replace failed: {e}");
+                                }
+                                // Nach dem Write (auch dem fehlgeschlagenen —
+                                // clearContents zählt hoch) hat sich changeCount
+                                // erhöht. Diesen neuen Stand als verarbeitet
+                                // merken, sonst feuert der nächste Tick wegen
+                                // unseres eigenen Writes.
                                 let new_count = unsafe { current_change_count() };
                                 last_processed_count = new_count;
                                 log::debug!("auto-replaced clipboard, new count={new_count}");
@@ -145,15 +148,24 @@ pub(super) unsafe fn read_text() -> Option<String> {
 /// nur den Text-Type — andere Formate (HTML/RTF) blieben aus dem alten Inhalt
 /// erhalten.
 ///
+/// `Err`, wenn `setString:forType:` NO liefert (Pasteboard von anderer App
+/// gehalten o. ä.) — der Aufrufer MUSS das melden können: nach dem
+/// `clearContents` wäre das Clipboard sonst leer, während die Bühne
+/// „liegt im Clipboard" behauptet.
+///
 /// # Safety
 ///
 /// Gleiche Threading-Annahme wie [`current_change_count`].
-pub(super) unsafe fn write_text(text: &str) {
+pub(super) unsafe fn write_text(text: &str) -> Result<(), String> {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
     let ns_type = NSString::from_str("public.utf8-plain-text");
     let ns_text = NSString::from_str(text);
-    let _ = pb.setString_forType(&ns_text, &ns_type);
+    if pb.setString_forType(&ns_text, &ns_type) {
+        Ok(())
+    } else {
+        Err("NSPasteboard setString:forType: lieferte NO (Pasteboard belegt?)".into())
+    }
 }
 
 /// Liest den HTML-Flavor (`public.html`) der allgemeinen Pasteboard. Word,
@@ -175,18 +187,28 @@ pub(super) unsafe fn read_html() -> Option<String> {
 /// konsistenten Clipboard-Zustand (formatiert für Word/Outlook, Text für
 /// alles andere).
 ///
+/// `Err`, sobald einer der beiden Writes NO liefert — der Aufrufer (Bühne)
+/// versucht dann den Text-only-Fallback bzw. warnt, statt fälschlich
+/// „liegt im Clipboard" zu melden.
+///
 /// # Safety
 ///
 /// Gleiche Threading-Annahme wie [`current_change_count`].
-pub(super) unsafe fn write_html(html: &str, text_fallback: &str) {
+pub(super) unsafe fn write_html(html: &str, text_fallback: &str) -> Result<(), String> {
     let pb = NSPasteboard::generalPasteboard();
     pb.clearContents();
-    let _ = pb.setString_forType(
+    let html_ok = pb.setString_forType(
         &NSString::from_str(html),
         &NSString::from_str("public.html"),
     );
-    let _ = pb.setString_forType(
+    let text_ok = pb.setString_forType(
         &NSString::from_str(text_fallback),
         &NSString::from_str("public.utf8-plain-text"),
     );
+    match (html_ok, text_ok) {
+        (true, true) => Ok(()),
+        (h, t) => Err(format!(
+            "NSPasteboard setString:forType: lieferte NO (html_ok={h}, text_ok={t})"
+        )),
+    }
 }

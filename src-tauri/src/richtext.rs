@@ -291,25 +291,88 @@ pub struct RichRedaction {
     pub redacted_html: String,
 }
 
-/// Baut aus dem **sanitisierten** HTML und den Findings (Byte-Offsets im
-/// Plaintext von [`extract_plaintext`]) die annotierte und die geschwärzte
-/// HTML-Fassung.
+/// Ergebnis von [`parse_sanitized`]: geparster Baum plus extrahierter
+/// Detection-Plaintext und Textknoten-Slices. Wird von [`redact`]
+/// wiederverwendet, damit der Hot-Path (Capture → Bühne) das HTML nicht
+/// mehrfach parsen muss. Enthält `NodeRef` (Rc-basiert, nicht `Send`) —
+/// lebt nur innerhalb eines Capture-Durchlaufs auf einem Thread.
+pub struct ParsedRichText {
+    document: NodeRef,
+    plaintext: String,
+    slices: Vec<TextSlice>,
+}
+
+impl ParsedRichText {
+    /// Der Detection-Plaintext — Byte-Offsets darauf berechneter Findings
+    /// passen zu [`redact`].
+    pub fn plaintext(&self) -> &str {
+        &self.plaintext
+    }
+}
+
+/// Parst **sanitisiertes** HTML genau einmal und extrahiert den Plaintext.
+pub fn parse_sanitized(sanitized_html: &str) -> ParsedRichText {
+    let document = parse(sanitized_html);
+    let (plaintext, slices) = walk_text_nodes(&document);
+    ParsedRichText {
+        document,
+        plaintext,
+        slices,
+    }
+}
+
+/// Sichtbarer Textgehalt = Plaintext ohne die vom Walk injizierten
+/// Bild-Platzhalter. Entscheidet, ob der HTML-Flow überhaupt lohnt: ein
+/// Nur-Bild-HTML (nur „[Bild entfernt]" als Inhalt) muss auf den
+/// Plain-Text-Flavor zurückfallen — sonst zeigt die Bühne Platzhalter-Text
+/// und ein PII-haltiger Text-Flavor bliebe ungescannt.
+pub fn has_visible_text(plaintext: &str) -> bool {
+    !plaintext.replace(IMAGE_PLACEHOLDER, " ").trim().is_empty()
+}
+
+/// Baut aus dem geparsten Dokument und den Findings (Byte-Offsets im
+/// Plaintext von [`ParsedRichText::plaintext`]) die annotierte und die
+/// geschwärzte HTML-Fassung. Konsumiert `parsed` — dessen Baum wird zur
+/// Annotate-Fassung mutiert; nur die Redact-Fassung braucht einen zweiten
+/// Parse von `sanitized_html` (die Cut-Berechnung wird geteilt: Schnitte
+/// referenzieren Slices per Index und gelten für jeden Baum aus demselben
+/// sanitisierten HTML — identischer Parser + Walk → identische Slices).
 ///
 /// Findings, deren Offsets sich nicht sauber auf Textknoten mappen lassen
 /// (dürfte nie passieren — Detection und Walk teilen sich den Plaintext),
 /// werden defensiv übersprungen statt zu panicken.
-pub fn redact(sanitized_html: &str, findings: &[Finding]) -> RichRedaction {
+pub fn redact(
+    parsed: ParsedRichText,
+    sanitized_html: &str,
+    findings: &[Finding],
+) -> RichRedaction {
+    let mut sorted: Vec<&Finding> = findings.iter().collect();
+    sorted.sort_by_key(|f| f.start);
+
+    let cuts_per_slice = compute_cuts(&parsed.slices, &sorted);
+
+    // Annotate auf dem bereits geparsten Baum.
+    apply_cuts(&parsed.slices, &cuts_per_slice, &sorted, RenderMode::Annotate);
+    let annotated_html = serialize_body(&parsed.document);
+
+    // Redact braucht einen unveränderten Baum → ein zweiter (letzter) Parse.
+    let redact_doc = parse(sanitized_html);
+    let (_plaintext, redact_slices) = walk_text_nodes(&redact_doc);
+    apply_cuts(&redact_slices, &cuts_per_slice, &sorted, RenderMode::Redact);
+    let redacted_html = serialize_body(&redact_doc);
+
     RichRedaction {
-        annotated_html: apply_to_dom(sanitized_html, findings, RenderMode::Annotate),
-        redacted_html: apply_to_dom(sanitized_html, findings, RenderMode::Redact),
+        annotated_html,
+        redacted_html,
     }
 }
 
 /// Extrahiert den Detection-Plaintext aus dem **sanitisierten** HTML.
-/// Byte-Offsets der darauf berechneten Findings passen zu [`redact`].
+/// Convenience über [`parse_sanitized`] — im Hot-Path stattdessen das
+/// geparste Ergebnis behalten und an [`redact`] weiterreichen.
+#[cfg(test)]
 pub fn extract_plaintext(sanitized_html: &str) -> String {
-    let (plaintext, _slices) = walk_text_nodes(&parse(sanitized_html));
-    plaintext
+    parse_sanitized(sanitized_html).plaintext
 }
 
 /// Parst HTML zu einem Dokument-Knoten. Kuchikikis `one()` liefert den Sink;
@@ -324,72 +387,83 @@ enum RenderMode {
     Redact,
 }
 
-/// Der gemeinsame Kern hinter beiden [`redact`]-Ausgaben: parsen, Walk,
-/// Findings auf Knoten-Ranges verteilen, Textknoten zerschneiden, Body-Inhalt
-/// serialisieren.
-fn apply_to_dom(sanitized_html: &str, findings: &[Finding], mode: RenderMode) -> String {
-    let document = parse(sanitized_html);
-    let (_plaintext, slices) = walk_text_nodes(&document);
-
-    let mut sorted: Vec<&Finding> = findings.iter().collect();
-    sorted.sort_by_key(|f| f.start);
-
-    // Pro Textknoten die Schnitte einsammeln — erst sammeln, dann mutieren:
-    // der Walk darf nicht gleichzeitig den DOM umbauen.
+/// Verteilt die (sortierten, überlappungsfreien) Findings auf die Slices —
+/// Two-Pointer über beide aufsteigende Listen, O(Findings + Slices +
+/// Schnitte) statt Findings × Slices.
+fn compute_cuts(slices: &[TextSlice], sorted: &[&Finding]) -> Vec<Vec<Cut>> {
     let mut cuts_per_slice: Vec<Vec<Cut>> = Vec::with_capacity(slices.len());
     cuts_per_slice.resize_with(slices.len(), Vec::new);
 
+    let mut slice_cursor = 0usize;
     let mut prev_end = 0usize;
-    for f in sorted {
+    for (finding_index, f) in sorted.iter().enumerate() {
         // Defensive: rückwärts/überlappend → skip (Detection garantiert
         // Überlappungsfreiheit, aber ein Bug darf hier nicht die ganze
         // Bühne reißen).
         if f.start < prev_end || f.start > f.end {
             continue;
         }
+        // Slices, die vor diesem Finding enden, sind auch für alle folgenden
+        // Findings uninteressant (beide Listen aufsteigend).
+        while slice_cursor < slices.len() && slices[slice_cursor].plain_end <= f.start {
+            slice_cursor += 1;
+        }
         let mut is_first = true;
-        for (i, slice) in slices.iter().enumerate() {
-            if slice.plain_end <= f.start || slice.plain_start >= f.end {
-                continue;
+        let mut i = slice_cursor;
+        while i < slices.len() && slices[i].plain_start < f.end {
+            let slice = &slices[i];
+            if slice.plain_end > f.start {
+                let local_start = f.start.max(slice.plain_start) - slice.plain_start;
+                let local_end = f.end.min(slice.plain_end) - slice.plain_start;
+                cuts_per_slice[i].push(Cut {
+                    local_start,
+                    local_end,
+                    finding_index,
+                    is_first_part: is_first,
+                });
+                is_first = false;
             }
-            let local_start = f.start.max(slice.plain_start) - slice.plain_start;
-            let local_end = f.end.min(slice.plain_end) - slice.plain_start;
-            cuts_per_slice[i].push(Cut {
-                local_start,
-                local_end,
-                finding: f.clone(),
-                is_first_part: is_first,
-            });
-            is_first = false;
+            i += 1;
         }
         prev_end = f.end;
     }
+    cuts_per_slice
+}
 
+/// Wendet die Schnitte auf die Slices EINES Baums an (erst sammeln, dann
+/// mutieren — der Walk darf nicht gleichzeitig den DOM umbauen). Die Slices
+/// dürfen aus einem anderen Baum stammen als dem der Cut-Berechnung, solange
+/// beide aus demselben sanitisierten HTML geparst wurden.
+fn apply_cuts(
+    slices: &[TextSlice],
+    cuts_per_slice: &[Vec<Cut>],
+    sorted: &[&Finding],
+    mode: RenderMode,
+) {
     for (slice, cuts) in slices.iter().zip(cuts_per_slice) {
         if cuts.is_empty() {
             continue;
         }
-        rebuild_text_node(slice, &cuts, mode);
+        rebuild_text_node(slice, cuts, sorted, mode);
     }
-
-    serialize_body(&document)
 }
 
 /// Ein Schnitt in einem Textknoten: welcher lokale Byte-Range des Knotens
-/// gehört zu welchem Finding, und ist es der erste Teil des Findings (nur der
-/// trägt das Replacement — Fortsetzungs-Teile werden geleert/kollabiert).
+/// gehört zu welchem Finding (Index in die sortierte Finding-Liste), und ist
+/// es der erste Teil des Findings (nur der trägt das Replacement —
+/// Fortsetzungs-Teile werden geleert/kollabiert).
 struct Cut {
     local_start: usize,
     local_end: usize,
-    finding: Finding,
+    finding_index: usize,
     is_first_part: bool,
 }
 
 /// Zerschneidet einen Textknoten an den Cut-Grenzen und ersetzt ihn durch die
 /// Folge aus Text-Resten und Finding-Knoten (Annotations-Span bzw. Token-Text).
 /// Die Cuts sind aufsteigend sortiert und überlappungsfrei (Vorbedingung aus
-/// [`apply_to_dom`] — Findings sind es, und lokale Ranges erben das).
-fn rebuild_text_node(slice: &TextSlice, cuts: &[Cut], mode: RenderMode) {
+/// [`compute_cuts`] — Findings sind es, und lokale Ranges erben das).
+fn rebuild_text_node(slice: &TextSlice, cuts: &[Cut], sorted: &[&Finding], mode: RenderMode) {
     let original_text = match slice.node.as_text() {
         Some(t) => t.borrow().to_string(),
         None => return,
@@ -398,7 +472,10 @@ fn rebuild_text_node(slice: &TextSlice, cuts: &[Cut], mode: RenderMode) {
     let mut replacement_nodes: Vec<NodeRef> = Vec::new();
     let mut pos = 0usize;
     for cut in cuts {
-        // Defensive gegen kaputte lokale Ranges (dürfte nie greifen).
+        // Defensive gegen kaputte lokale Ranges/Indizes (dürfte nie greifen).
+        let Some(finding) = sorted.get(cut.finding_index) else {
+            continue;
+        };
         if cut.local_start < pos
             || cut.local_end > original_text.len()
             || cut.local_start > cut.local_end
@@ -411,14 +488,14 @@ fn rebuild_text_node(slice: &TextSlice, cuts: &[Cut], mode: RenderMode) {
         let part = &original_text[cut.local_start..cut.local_end];
         match mode {
             RenderMode::Annotate => {
-                replacement_nodes.push(annotation_span(part, cut));
+                replacement_nodes.push(annotation_span(part, finding, cut.is_first_part));
             }
             RenderMode::Redact => {
                 // Ersetzung nur im ersten Teil; Fortsetzungs-Teile werden
                 // geleert (Vertrag: „Ersetzung in den ersten Knoten,
                 // Rest-Anteile leeren").
                 if cut.is_first_part {
-                    replacement_nodes.push(NodeRef::new_text(&cut.finding.token));
+                    replacement_nodes.push(NodeRef::new_text(&finding.token));
                 }
             }
         }
@@ -438,7 +515,7 @@ fn rebuild_text_node(slice: &TextSlice, cuts: &[Cut], mode: RenderMode) {
 /// `<span data-sz-finding data-original data-replacement data-entity-type
 /// data-confidence>Teil-Text</span>`; Fortsetzungs-Teile tragen zusätzlich
 /// `data-sz-cont` und ein leeres Replacement.
-fn annotation_span(part_text: &str, cut: &Cut) -> NodeRef {
+fn annotation_span(part_text: &str, finding: &Finding, is_first_part: bool) -> NodeRef {
     use html5ever::{local_name, namespace_url, ns, LocalName, QualName};
     use kuchikiki::{Attribute, ExpandedName};
 
@@ -454,12 +531,12 @@ fn annotation_span(part_text: &str, cut: &Cut) -> NodeRef {
 
     let mut attributes = vec![
         attr("data-sz-finding", ""),
-        attr("data-entity-type", &cut.finding.entity_type),
-        attr("data-confidence", &format!("{:.2}", cut.finding.confidence)),
+        attr("data-entity-type", &finding.entity_type),
+        attr("data-confidence", &format!("{:.2}", finding.confidence)),
     ];
-    if cut.is_first_part {
-        attributes.push(attr("data-original", &cut.finding.original));
-        attributes.push(attr("data-replacement", &cut.finding.token));
+    if is_first_part {
+        attributes.push(attr("data-original", &finding.original));
+        attributes.push(attr("data-replacement", &finding.token));
     } else {
         attributes.push(attr("data-sz-cont", ""));
         attributes.push(attr("data-replacement", ""));
@@ -631,7 +708,7 @@ mod tests {
         let html = sanitize("<p>Sehr geehrter Herr Müller, hallo</p>");
         let text = extract_plaintext(&html);
         let f = finding_for(&text, "Herr Müller", "«P_a4b»", "person");
-        let out = redact(&html, &[f]);
+        let out = redact(parse_sanitized(&html), &html, &[f]);
 
         // annotated: Original im Span mit allen data-Attributen.
         assert!(
@@ -655,7 +732,7 @@ mod tests {
         let html = sanitize("<p>Von Max <b>Mustermann</b> gesendet</p>");
         let text = extract_plaintext(&html);
         let f = finding_for(&text, "Max Mustermann", "«P_x9z»", "person");
-        let out = redact(&html, &[f]);
+        let out = redact(parse_sanitized(&html), &html, &[f]);
 
         // annotated: zwei Spans — erster mit Replacement, zweiter als
         // Fortsetzung markiert; der <b>-Rahmen bleibt stehen.
@@ -681,7 +758,7 @@ mod tests {
         let html = sanitize(r#"<p style="color: red">IBAN <i>DE89370400440532013000</i> Ende</p>"#);
         let text = extract_plaintext(&html);
         let f = finding_for(&text, "DE89370400440532013000", "«I_k2m»", "iban");
-        let out = redact(&html, &[f]);
+        let out = redact(parse_sanitized(&html), &html, &[f]);
         assert!(out.redacted_html.contains("color: red"), "got: {}", out.redacted_html);
         assert!(out.redacted_html.contains("<i>«I_k2m»</i>"), "got: {}", out.redacted_html);
     }
@@ -691,7 +768,7 @@ mod tests {
         let html = sanitize(r#"<p>Text</p><img src="https://tracker.example/p.gif">"#);
         let text = extract_plaintext(&html);
         assert!(text.contains(IMAGE_PLACEHOLDER), "got: {text:?}");
-        let out = redact(&html, &[]);
+        let out = redact(parse_sanitized(&html), &html, &[]);
         assert!(out.redacted_html.contains(IMAGE_PLACEHOLDER));
         assert!(!out.redacted_html.contains("<img"));
     }
@@ -703,7 +780,7 @@ mod tests {
         let html = sanitize("<p>Grüße an Max über Köln</p>");
         let text = extract_plaintext(&html);
         let f = finding_for(&text, "Max", "«P_q»", "person");
-        let out = redact(&html, &[f]);
+        let out = redact(parse_sanitized(&html), &html, &[f]);
         assert!(out.redacted_html.contains("Grüße an «P_q» über Köln"));
     }
 
@@ -713,7 +790,7 @@ mod tests {
         let text = extract_plaintext(&html);
         let f1 = finding_for(&text, "Max", "«P_a»", "person");
         let f2 = finding_for(&text, "Eva", "«P_b»", "person");
-        let out = redact(&html, &[f1, f2]);
+        let out = redact(parse_sanitized(&html), &html, &[f1, f2]);
         assert!(out.redacted_html.contains("«P_a» und «P_b» kommen"));
         assert_eq!(out.annotated_html.matches("data-sz-finding").count(), 2);
     }
@@ -721,7 +798,7 @@ mod tests {
     #[test]
     fn redact_with_no_findings_returns_sanitized_equivalent() {
         let html = sanitize("<p>Nur <b>Text</b></p>");
-        let out = redact(&html, &[]);
+        let out = redact(parse_sanitized(&html), &html, &[]);
         assert!(out.annotated_html.contains("Nur <b>Text</b>"));
         assert_eq!(out.annotated_html, out.redacted_html);
     }
@@ -736,7 +813,7 @@ mod tests {
             findings.iter().any(|f| f.entity_type == "email"),
             "Detection findet die Mail nicht: {text:?}"
         );
-        let out = redact(&html, &findings);
+        let out = redact(parse_sanitized(&html), &html, &findings);
         assert!(!out.redacted_html.contains("max.mustermann@example.de"));
         assert!(out.redacted_html.contains("<b>"));
     }
@@ -747,21 +824,42 @@ mod tests {
         // Original dürfen das Markup nicht aufbrechen (macht der Serializer).
         let html = sanitize(r#"<p>Mail an x"&<b@example.de jetzt</p>"#);
         let text = extract_plaintext(&html);
-        // Hand-gebautes Finding mit fiesen Zeichen im Original.
+        // Hand-gebautes Finding mit fiesen Zeichen im Original. `expect`
+        // statt `if let` — verschwindet die Needle durch eine künftige
+        // sanitize-Änderung, soll dieser Test LAUT scheitern statt still
+        // grün zu werden (er ist die einzige Absicherung des
+        // Attribut-Escapings von data-original).
         let needle = r#"x"&"#;
-        if let Some(start) = text.find(needle) {
-            let f = Finding {
-                entity_type: "email".into(),
-                original: needle.into(),
-                token: "«E_t»".into(),
-                start,
-                end: start + needle.len(),
-                confidence: 0.9,
-            };
-            let out = redact(&html, &[f]);
-            // Parsebar bleiben: der Serializer escapet Quotes in Attributen.
-            assert!(out.annotated_html.contains("data-original"));
-            assert!(!out.annotated_html.contains(r#"data-original="x"&""#));
-        }
+        let start = text
+            .find(needle)
+            .expect("Testvorbedingung: Needle muss im extrahierten Plaintext stehen");
+        let f = Finding {
+            entity_type: "email".into(),
+            original: needle.into(),
+            token: "«E_t»".into(),
+            start,
+            end: start + needle.len(),
+            confidence: 0.9,
+        };
+        let out = redact(parse_sanitized(&html), &html, &[f]);
+        // Parsebar bleiben: der Serializer escapet Quotes in Attributen.
+        assert!(out.annotated_html.contains("data-original"));
+        assert!(!out.annotated_html.contains(r#"data-original="x"&""#));
+    }
+
+    #[test]
+    fn visible_text_ignores_image_placeholder() {
+        // Nur-Bild-HTML: der injizierte Platzhalter zählt NICHT als Text —
+        // sonst greift der Plain-Text-Fallback in prepare_content nie
+        // (Review-Befund zu Stufe 2).
+        let html = sanitize(r#"<img src="https://tracker.example/p.gif">"#);
+        let text = extract_plaintext(&html);
+        assert!(text.contains(IMAGE_PLACEHOLDER));
+        assert!(!has_visible_text(&text));
+
+        let html = sanitize(r#"<p>Echter Text</p><img src="https://x.example/a.png">"#);
+        assert!(has_visible_text(&extract_plaintext(&html)));
+
+        assert!(!has_visible_text("   \n\t "));
     }
 }

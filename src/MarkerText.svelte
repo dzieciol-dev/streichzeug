@@ -130,13 +130,29 @@
 
     // Einheitliche Sicht auf die animierbaren Fundstellen: Segment-Indizes
     // (plain) bzw. DOM-Spans (html) — die Choreografie darunter ist identisch.
-    const units: ((phase: string) => void)[] =
-      contentKind === "html"
-        ? prepareHtmlFindings().map((el) => (p: string) => setElementPhase(el, p))
-        : segments
-            .map((seg, i) => (seg.kind === "finding" ? i : -1))
-            .filter((i) => i >= 0)
-            .map((i) => (p: string) => setPhase(i, p));
+    // HTML: Fortsetzungs-Spans (data-sz-cont, Finding über Tag-Grenze) werden
+    // ihrem Primär-Span zugeschlagen — EIN Finding ist EINE Unit, alle Teile
+    // wechseln die Phase gleichzeitig. Sonst animiert „Max <b>Mustermann</b>"
+    // als zwei zeitversetzte Findings und verzerrt die Stagger-Stauchung.
+    let units: ((phase: string) => void)[];
+    if (contentKind === "html") {
+      const groups: HTMLElement[][] = [];
+      for (const span of prepareHtmlFindings()) {
+        if (span.hasAttribute("data-sz-cont") && groups.length > 0) {
+          groups[groups.length - 1].push(span);
+        } else {
+          groups.push([span]);
+        }
+      }
+      units = groups.map(
+        (group) => (p: string) => group.forEach((el) => setElementPhase(el, p))
+      );
+    } else {
+      units = segments
+        .map((seg, i) => (seg.kind === "finding" ? i : -1))
+        .filter((i) => i >= 0)
+        .map((i) => (p: string) => setPhase(i, p));
+    }
 
     if (effective === "off" || units.length === 0) {
       strokeMs = 0;

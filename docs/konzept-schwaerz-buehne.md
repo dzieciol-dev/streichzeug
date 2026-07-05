@@ -517,8 +517,90 @@ nach Verarbeitung gelöscht).
 Bild anzeigen, schwarze Balken animiert einblenden (gleiche Marker-Sprache,
 Balken statt Strich), darunter der geschwärzte Text. Deutlicher
 Warnhinweis: „Automatisch geschwärzt — bitte visuell prüfen, bevor du das
-Bild teilst." Drag&Drop-Zone in der Bühne (`tauri://drag-drop`-Events)
-als zweiter Eingang neben dem Capture-Hotkey.
+Bild teilst." Drag&Drop-Zone in der Bühne — **per HTML5
+(`dataTransfer.files`), nicht `tauri://drag-drop`**: am Main-Window ist
+`dragDropEnabled: false` gesetzt (nötig für den Text-Drop aus Stufe 1,
+Tauri würde Drops sonst abfangen) — als zweiter Eingang neben dem
+Capture-Hotkey.
+
+---
+
+## 5a. PDF-Kapitel (spezifiziert 2026-07-05, Status: nicht begonnen)
+
+PDFs sind der dritte Eingabetyp nach Text und Bildern — und der
+gefährlichste, weil hier eine **scheinbar** funktionierende Lösung aktiv
+schadet.
+
+### 5a.1 Die Redaction-Falle (verbindliche Leitplanke)
+
+Ein schwarzer Balken **über** dem Text eines Text-PDFs ist keine
+Schwärzung: der Text liegt weiterhin im Content-Stream, ist markierbar,
+kopierbar und für jede Volltextsuche sichtbar (die Aktenzeichen-Klassiker
+dieser Falle sind gut dokumentiert). Für ein Privacy-Tool ist das
+schlimmer als gar kein PDF-Support — der User verlässt sich auf eine
+Schwärzung, die keine ist.
+
+**Leitplanke:** Streichzeug liefert NIE ein PDF aus, in dem geschwärzte
+Inhalte noch als Text/Objekt vorhanden sind. Wenn das nicht garantierbar
+ist, wird der Export verweigert — kein „Best Effort".
+
+### 5a.2 Gewählter Ansatz: Rasterisieren statt Content-Stream-Chirurgie
+
+Echte In-Place-PDF-Redaction (Text-Operatoren entfernen, Fonts/Subsets,
+`ToUnicode`-Maps, Form-XObjects, Annotations, inkrementelle Updates mit
+alten Objekt-Generationen, Objekt-Streams …) ist ein eigenes Produkt und
+voller stiller Fehlerquellen — genau die Sorte „sieht geschwärzt aus, ist
+es aber nicht". Deshalb bewusst der robuste Weg:
+
+1. **Jede Seite rendern** (natives OS-Rendering: macOS PDFKit /
+   `CGPDFDocument`, Windows `Windows.Data.Pdf` — kein neues Dependency-
+   Schwergewicht, kein Netz), Ziel ~200 DPI.
+2. Seiten-Bitmaps durch die **Bild-Pipeline aus WP-I** (Text-PDFs: eigene
+   Textebene pro Seite statt OCR nutzen, wenn vorhanden — genauere Boxen;
+   gescannte PDFs: OCR wie bei Bildern).
+3. Balken ins Bitmap rendern, Seiten als **neues, rein rasterbasiertes
+   PDF** wieder zusammensetzen. Das Ausgabe-PDF enthält NUR Bilder — es
+   gibt strukturell nichts, was unter einem Balken „noch da" sein könnte.
+   Metadaten (Info-Dict, XMP, Anhänge, Formularfelder) existieren im
+   Neuaufbau gar nicht erst.
+
+**Ehrlich dokumentierte Trade-offs:** Durchsuchbarkeit, Textauswahl und
+Barrierefreiheit des Ausgabe-PDFs gehen verloren; Dateigröße steigt.
+Das UI sagt das klar an („Ausgabe ist ein Bild-PDF"). Wer ein
+durchsuchbares geschwärztes PDF braucht, ist bei spezialisierten
+Redaction-Tools richtig — bewusste Nicht-Anforderung (in 1.2 einsortieren,
+falls je wieder diskutiert).
+
+### 5a.3 Verträge-Erweiterung
+
+- `content_kind: "pdf"`; Job-Payload wie `"image"`, aber `pages:
+  [{image_path, boxes}]` statt eines Einzelbilds; Anzeige = Seiten
+  untereinander, gleiche Balken-Animation (WP-J-Komponente wiederverwendet).
+- `stash` speichert den Pfad des **geschwärzten** Bild-PDFs im
+  App-Datenverzeichnis (Original wird nach Verarbeitung gelöscht — gleiche
+  Regel wie Bilder in Stufe 3). `stash_copy` legt den Datei-Pfad als
+  File-Referenz ins Clipboard (macOS `public.file-url`, Windows `CF_HDROP`).
+- **Caps:** max. 50 Seiten und 100 MB Eingabe im MVP (darüber
+  Fehler-State mit klarer Ansage); Seiten-Rendering gestreamt, nicht alle
+  Bitmaps gleichzeitig im Speicher.
+- Eingang: ausschließlich Drag&Drop/Datei-Dialog (`dataTransfer.files`,
+  s. WP-J). Kein Capture-Hotkey-Pfad — PDFs liegen nicht als Markierung vor.
+
+### 5a.4 Arbeitspaket WP-K — PDF-Pipeline (nach WP-I/J)
+
+**Liefern:** Plattform-Renderer-Adapter (`PdfRenderer`-Trait analog
+`OcrEngine`), Seiten-Schleife mit Text-Ebene-Extraktion (macOS:
+`PDFPage.attributedString` + Selection-Bounds; Windows: `Windows.Data.Pdf`
+rendert nur — Textebene via OCR-Fallback), Wiederzusammenbau als Bild-PDF
+(minimaler PDF-Writer für den Nur-Bilder-Fall ist ~200 Zeilen, kein
+externes Crate nötig — oder `printpdf`, falls Lizenz/Tree ok), Golden-Test
+mit einem Text-PDF-Fixture: **Assertion, dass der geschwärzte String im
+Ausgabe-PDF-Bytestrom nicht mehr vorkommt** (die Redaction-Falle als
+Test).
+
+**Akzeptanz:** Text-PDF und Scan-PDF end-to-end; Copy&Paste aus dem
+Ausgabe-PDF liefert keinen geschwärzten Inhalt; 50-Seiten-Cap greift;
+Warnhinweis sichtbar.
 
 ---
 

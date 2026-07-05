@@ -63,6 +63,14 @@ const MODIFIER_RELEASE_BUDGET: Duration = Duration::from_millis(1000);
 /// versehentlich kopierter Riesentext das Frontend nicht lahmlegt.
 const SEGMENT_CHAR_CAP: usize = 8000;
 
+/// Anzeige-Cap für annotiertes HTML (**Bytes**, Stufe 2). Der Zeichen-Cap
+/// allein reicht nicht: `data:`-Bilder bis 256 KB und schweres Markup können
+/// trotz weniger Text-Zeichen ein Multi-MB-DOM erzeugen, das per `{@html}`
+/// das Bühnen-Fenster einfriert. Darüber fällt NUR die Anzeige auf den
+/// Plain-Preview zurück — Clipboard/Ablage behalten die volle formatierte
+/// Fassung.
+const ANNOTATED_HTML_DISPLAY_CAP_BYTES: usize = 1024 * 1024;
+
 /// Ein Anzeige-Segment für die Marker-Animation. Das Backend schneidet den
 /// Text selbst in Segmente, weil `Finding.start/end` **Byte**-Offsets sind,
 /// das Frontend aber in UTF-16-Code-Units rechnet — Offset-Arithmetik im
@@ -101,6 +109,13 @@ struct StageJob {
     truncated: bool,
     /// Anzeige-Reihenfolge = Array-Reihenfolge.
     segments: Vec<Segment>,
+    /// `"plain"` | `"html"` (Stufe 2). Bei `"html"` trägt `annotated_html`
+    /// die Anzeige; `segments` ist dann leer — außer die Anzeige fällt wegen
+    /// des Zeichen-Caps auf den Plain-Preview zurück (`truncated: true`).
+    content_kind: String,
+    /// Sanitisiertes HTML mit `data-sz-finding`-Spans für die
+    /// Marker-Animation. Nur bei `content_kind: "html"`.
+    annotated_html: Option<String>,
 }
 
 /// Ergebnis der reinen Klassifikation des gecaptureten Clipboard-Texts.
@@ -125,6 +140,84 @@ fn classify_capture(text: Option<String>) -> CaptureDecision {
         Some(t) if t.len() > MAX_CLIPBOARD_BYTES => CaptureDecision::TooLarge(t.len()),
         Some(t) => CaptureDecision::Proceed(t),
         None => CaptureDecision::Empty,
+    }
+}
+
+/// Der aufbereitete Bühnen-Inhalt nach der Format-Entscheidung (Stufe 2).
+enum StageContent {
+    /// Plain-Text-Flow wie in Stufe 1.
+    Plain(String),
+    /// HTML-Flow: `sanitized` ist das bereinigte HTML, `parsed` der bereits
+    /// geparste Baum inkl. Detection-Plaintext (Offsets passen zu
+    /// `richtext::redact`). `text_flavor` ist der ORIGINALE Plain-Text-Flavor
+    /// der Quell-App (falls brauchbar) — er liefert den Text-Fallback für
+    /// Clipboard/Ablage, damit z. B. Listennummern erhalten bleiben, die die
+    /// HTML-Plaintext-Ableitung nicht synthetisiert.
+    Html {
+        sanitized: String,
+        parsed: crate::richtext::ParsedRichText,
+        text_flavor: Option<String>,
+    },
+}
+
+// `ParsedRichText` hat kein `Debug`/`PartialEq` (DOM-Baum) — für Test-
+// Fehlermeldungen reicht die Variante plus Textgehalt.
+impl std::fmt::Debug for StageContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StageContent::Plain(t) => f.debug_tuple("Plain").field(t).finish(),
+            StageContent::Html { parsed, text_flavor, .. } => f
+                .debug_struct("Html")
+                .field("plaintext", &parsed.plaintext())
+                .field("text_flavor", text_flavor)
+                .finish(),
+        }
+    }
+}
+
+/// Entscheidet zwischen HTML- und Plain-Flow. HTML gewinnt, wenn ein
+/// HTML-Flavor anliegt, unter dem Größen-Cap bleibt und nach dem Sanitizing
+/// noch **sichtbarer** Text übrig ist — der von uns injizierte
+/// „[Bild entfernt]"-Platzhalter zählt nicht (ein Nur-Bild-HTML muss auf den
+/// Text-Flavor zurückfallen, sonst bliebe dessen Inhalt ungescannt).
+///
+/// Sanitizing passiert bewusst HIER, vor jeder weiteren Verarbeitung: ab
+/// diesem Punkt existiert das Original-HTML (mit Tracking-Pixeln, Scripts,
+/// href-Adressen) im Flow nicht mehr.
+fn prepare_content(
+    text: Option<String>,
+    html: Option<String>,
+) -> Result<StageContent, CaptureDecision> {
+    let (text_flavor, text_error) = match classify_capture(text) {
+        CaptureDecision::Proceed(t) => (Some(t), None),
+        other => (None, Some(other)),
+    };
+
+    if let Some(raw_html) = html {
+        if !raw_html.is_empty() && raw_html.len() <= MAX_CLIPBOARD_BYTES {
+            let sanitized = crate::richtext::sanitize(&raw_html);
+            let parsed = crate::richtext::parse_sanitized(&sanitized);
+            if crate::richtext::has_visible_text(parsed.plaintext()) {
+                return Ok(StageContent::Html {
+                    sanitized,
+                    parsed,
+                    text_flavor,
+                });
+            }
+            log::info!(
+                "stage: HTML-Flavor ohne sichtbaren Text (nur Bilder?) — Fallback auf Plain-Text"
+            );
+        } else if raw_html.len() > MAX_CLIPBOARD_BYTES {
+            log::info!(
+                "stage: HTML-Flavor {} Bytes über Cap — Fallback auf Plain-Text",
+                raw_html.len()
+            );
+        }
+    }
+    match (text_flavor, text_error) {
+        (Some(t), _) => Ok(StageContent::Plain(t)),
+        (None, Some(err)) => Err(err),
+        (None, None) => Err(CaptureDecision::Empty),
     }
 }
 
@@ -459,7 +552,27 @@ pub fn capture(app: &AppHandle) {
         }
     };
 
-    run_stage(app, text_to_use);
+    // Stufe 2: HTML-Flavor mitnehmen, wenn die Quelle formatiert kopiert hat
+    // (Word/Outlook/Browser legen HTML neben den Plain-Text). Der Flavor wird
+    // nur übernommen, wenn das Clipboard noch DENSELBEN Text trägt wie beim
+    // Capture — sonst hat ein Clipboard-Manager/Sync-Tool den Inhalt zwischen
+    // Poll-Erfolg und HTML-Read ersetzt, und wir würden fremden Inhalt
+    // schwärzen statt der Markierung des Users.
+    let html = match &text_to_use {
+        Some(t)
+            if crate::clipboard::read_clipboard_text().as_deref() == Some(t.as_str()) =>
+        {
+            crate::clipboard::read_clipboard_html()
+        }
+        Some(_) => {
+            log::info!(
+                "stage: Clipboard-Text hat sich seit dem Capture geändert — HTML-Flavor ignoriert"
+            );
+            None
+        }
+        None => None,
+    };
+    run_stage(app, text_to_use, html);
 }
 
 /// Einstieg ohne synthetischen Copy: schwärzt den **aktuellen** Clipboard-
@@ -468,7 +581,11 @@ pub fn capture(app: &AppHandle) {
 /// Quell-App bereits den Fokus, ein synthetisches Strg+C liefe ins Leere.
 pub fn capture_from_clipboard(app: &AppHandle) {
     log::info!("stage: capture from clipboard (Menü-/Button-Einstieg)");
-    run_stage(app, crate::clipboard::read_clipboard_text());
+    run_stage(
+        app,
+        crate::clipboard::read_clipboard_text(),
+        crate::clipboard::read_clipboard_html(),
+    );
 }
 
 /// Einstieg mit direkt übergebenem Text: für den Drag-&-Drop-Weg, bei dem der
@@ -476,50 +593,126 @@ pub fn capture_from_clipboard(app: &AppHandle) {
 /// ohne Clipboard und ohne synthetische Tastendrücke.
 pub fn capture_from_text(app: &AppHandle, text: String) {
     log::info!("stage: capture from dropped text ({} bytes)", text.len());
-    run_stage(app, Some(text));
+    run_stage(app, Some(text), None);
 }
 
-/// Gemeinsamer Kern hinter beiden Einstiegen: klassifizieren, schwärzen,
-/// Ablage, Event, Fenster. Entspricht Vertrag 2.5 ab Schritt 5.
-fn run_stage(app: &AppHandle, text_to_use: Option<String>) {
-    // 5. Klassifizieren: leer/nicht-Text oder >10 MB → Fehler-State.
-    let text = match classify_capture(text_to_use) {
-        CaptureDecision::Proceed(t) => t,
-        CaptureDecision::Empty => {
-            log::info!("stage: nichts Brauchbares im Clipboard — Fehler-State");
-            emit_error_state(app);
-            return;
-        }
-        CaptureDecision::TooLarge(n) => {
+/// Gemeinsamer Kern hinter allen Einstiegen: klassifizieren, schwärzen,
+/// Ablage, Event, Fenster. Entspricht Vertrag 2.5 ab Schritt 5; Stufe 2
+/// zweigt bei vorhandenem HTML-Flavor in den formatierten Flow ab.
+fn run_stage(app: &AppHandle, text_to_use: Option<String>, html_to_use: Option<String>) {
+    // 5. Format-Entscheidung + Klassifikation: leer/zu groß → Fehler-State.
+    let content = match prepare_content(text_to_use, html_to_use) {
+        Ok(c) => c,
+        Err(CaptureDecision::TooLarge(n)) => {
             log::warn!(
                 "stage: Clipboard {n} Bytes über {MAX_CLIPBOARD_BYTES}-Byte-Limit — Fehler-State"
             );
             emit_error_state(app);
             return;
         }
+        Err(_) => {
+            log::info!("stage: nichts Brauchbares im Clipboard — Fehler-State");
+            emit_error_state(app);
+            return;
+        }
     };
 
-    // 6. Detection — **nur Forward** (die Bühne macht kein Reverse).
+    // 6. Detection — **nur Forward** (die Bühne macht kein Reverse). Beim
+    // HTML-Flow läuft die Detection auf dem extrahierten Plaintext; die
+    // Offsets passen damit zu `richtext::redact`.
     let settings = Settings::load();
-    let (mode, job_id, findings, redacted) = run_forward(&text, &settings);
-
+    let (detection_text, html_ctx) = match content {
+        StageContent::Plain(t) => (t, None),
+        StageContent::Html {
+            sanitized,
+            parsed,
+            text_flavor,
+        } => (
+            parsed.plaintext().to_string(),
+            Some((sanitized, parsed, text_flavor)),
+        ),
+    };
+    let (mode, job_id, findings, redacted) = run_forward(&detection_text, &settings);
     let finding_count = findings.len();
-    let (segments, truncated) = build_segments(&text, &findings);
 
-    // 7./8. Bei ≥ 1 Finding: geschwärzten Text sofort ins Clipboard und in die
-    // Ablage. Bei 0 Findings (Schritt 9): Clipboard unverändert, kein Eintrag.
+    // Anzeige-Aufbereitung je Format. HTML: die Marker-Animation läuft über
+    // dem annotierten Dokument — außer Text ODER Markup sprengen die
+    // Anzeige-Caps, dann fällt NUR die Anzeige auf den (gekappten)
+    // Plain-Preview zurück; Clipboard und Ablage behalten die volle
+    // formatierte Fassung. Der Text-Fallback fürs Clipboard kommt aus dem
+    // ORIGINALEN Plain-Text-Flavor der Quelle (geschwärzt mit derselben
+    // case_id → identische Tokens), damit z. B. Listennummern erhalten
+    // bleiben; nur wenn keiner anliegt, dient der HTML-Plaintext als Ersatz.
+    let (content_kind, annotated_html, segments, truncated, redacted_html, fallback_text) =
+        match html_ctx {
+            None => {
+                let (segments, truncated) = build_segments(&detection_text, &findings);
+                ("plain", None, segments, truncated, None, redacted)
+            }
+            Some((sanitized, parsed, text_flavor)) => {
+                let rich = crate::richtext::redact(parsed, &sanitized, &findings);
+                let redacted_html =
+                    finalize_redacted_html(rich.redacted_html, mode, finding_count);
+                let fallback_text = match text_flavor {
+                    Some(source_text) => {
+                        redact_text_flavor(&source_text, mode == "strict", &job_id)
+                    }
+                    None => redacted,
+                };
+                if html_display_fits(&detection_text, &rich.annotated_html) {
+                    (
+                        "html",
+                        Some(rich.annotated_html),
+                        Vec::new(),
+                        false,
+                        Some(redacted_html),
+                        fallback_text,
+                    )
+                } else {
+                    let (segments, _) = build_segments(&detection_text, &findings);
+                    (
+                        "html",
+                        None,
+                        segments,
+                        true,
+                        Some(redacted_html),
+                        fallback_text,
+                    )
+                }
+            }
+        };
+
+    // 7./8. Bei ≥ 1 Finding: geschwärztes Ergebnis sofort ins Clipboard und
+    // in die Ablage. Bei 0 Findings (Schritt 9): Clipboard unverändert.
     let stash_id = if finding_count >= 1 {
-        if let Err(e) = crate::clipboard::write_clipboard_text(&redacted) {
+        let write_result = match &redacted_html {
+            Some(html) => crate::clipboard::write_clipboard_html(html, &fallback_text)
+                // Rich-Write fehlgeschlagen → wenigstens den Text liefern.
+                .or_else(|e| {
+                    log::warn!("stage: rich clipboard write failed ({e}) — Text-Fallback");
+                    crate::clipboard::write_clipboard_text(&fallback_text)
+                }),
+            None => crate::clipboard::write_clipboard_text(&fallback_text),
+        };
+        if let Err(e) = write_result {
             // Clipboard-Write ist best effort — die Ablage/Anzeige stimmt
             // trotzdem, der User kann später „Nochmal kopieren" nutzen.
             log::warn!("stage: clipboard write failed: {e}");
         }
         let counts = aggregate_entity_counts(&findings);
-        // `stash_insert` normalisiert/kürzt den Titel selbst — wir reichen den
-        // geschwärzten Text sowohl als Titel-Quelle als auch als Volltext.
-        let id = storage::stash_insert(mode, &redacted, &redacted, &counts);
+        // `stash_insert_rich` normalisiert/kürzt den Titel selbst — wir reichen
+        // den geschwärzten Text sowohl als Titel-Quelle als auch als Volltext.
+        let id = storage::stash_insert_rich(
+            mode,
+            &fallback_text,
+            &fallback_text,
+            &counts,
+            content_kind,
+            redacted_html.as_deref(),
+        );
         log::info!(
-            "stage: {finding_count} Finding(s) geschwärzt, Ablage-Eintrag #{id} (mode={mode})"
+            "stage: {finding_count} Finding(s) geschwärzt, Ablage-Eintrag #{id} \
+             (mode={mode}, kind={content_kind})"
         );
         Some(id)
     } else {
@@ -535,8 +728,57 @@ fn run_stage(app: &AppHandle, text_to_use: Option<String>) {
         finding_count,
         truncated,
         segments,
+        content_kind: content_kind.to_string(),
+        annotated_html,
     };
     emit_and_show(app, &payload);
+}
+
+/// Reine Anzeige-Entscheidung: passt das annotierte Dokument in die Bühne,
+/// oder muss die Anzeige auf den Plain-Preview zurückfallen? Beide Caps
+/// zählen — Text-Zeichen (Animations-/Segment-Last) UND HTML-Bytes
+/// (DOM-/Rendering-Last durch data:-Bilder und Markup).
+fn html_display_fits(plaintext: &str, annotated_html: &str) -> bool {
+    plaintext.chars().count() <= SEGMENT_CHAR_CAP
+        && annotated_html.len() <= ANNOTATED_HTML_DISPLAY_CAP_BYTES
+}
+
+/// Schwärzt den ORIGINALEN Plain-Text-Flavor der Quelle als Text-Fallback für
+/// Clipboard/Ablage. Reversibel läuft die Detection mit derselben `case_id`
+/// wie der HTML-Pfad — die HMAC-Tokens sind case-deterministisch, dieselbe
+/// Fundstelle bekommt in beiden Flavors dasselbe Pseudonym.
+fn redact_text_flavor(text: &str, strict: bool, case_id: &str) -> String {
+    if strict {
+        let findings = detection::detect_strict(text);
+        detection::apply_strict_with_hint(text, &findings)
+    } else {
+        let findings = detection::detect_with_case(text, case_id);
+        for f in &findings {
+            storage::record(case_id, &f.token, &f.original);
+        }
+        detection::apply_tokens_with_hint(text, &findings, case_id)
+    }
+}
+
+/// Hängt den LLM-Hinweis als HTML-Absatz an die geschwärzte formatierte
+/// Fassung — das Pendant zu `apply_*_with_hint` im Text-Pfad (dort steckt der
+/// Hinweis bereits im Text-Fallback). Ohne Findings bleibt das HTML pur.
+fn finalize_redacted_html(redacted_html: String, mode: &str, finding_count: usize) -> String {
+    if finding_count == 0 {
+        return redacted_html;
+    }
+    let hint = if mode == "strict" {
+        detection::LLM_HINT_STRICT
+    } else {
+        detection::LLM_HINT
+    };
+    let body = hint.trim_start().trim_start_matches("---").trim_start();
+    format!("{redacted_html}<hr><p>{}</p>", html_escape_text(body))
+}
+
+/// Minimales HTML-Escaping für Text, der in Markup eingebettet wird.
+fn html_escape_text(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// Führt den Forward-Detection-Pfad aus und liefert
@@ -582,6 +824,8 @@ fn emit_error_state(app: &AppHandle) {
         finding_count: 0,
         truncated: false,
         segments: Vec::new(),
+        content_kind: "plain".to_string(),
+        annotated_html: None,
     };
     emit_and_show(app, &payload);
 }
@@ -956,6 +1200,8 @@ mod tests {
             segments: vec![Segment::Text {
                 content: "hi".into(),
             }],
+            content_kind: "plain".into(),
+            annotated_html: None,
         };
         let j = serde_json::to_value(&job).unwrap();
         assert_eq!(j["job_id"], "c3f9");
@@ -964,6 +1210,8 @@ mod tests {
         assert_eq!(j["finding_count"], 3);
         assert_eq!(j["truncated"], false);
         assert!(j["segments"].is_array());
+        assert_eq!(j["content_kind"], "plain");
+        assert!(j["annotated_html"].is_null());
     }
 
     #[test]
@@ -975,8 +1223,146 @@ mod tests {
             finding_count: 0,
             truncated: false,
             segments: Vec::new(),
+            content_kind: "plain".into(),
+            annotated_html: None,
         };
         let j = serde_json::to_value(&job).unwrap();
         assert!(j["stash_id"].is_null());
+    }
+
+    // ----------------------------------------------------- prepare_content (Stufe 2)
+
+    #[test]
+    fn prepare_prefers_html_when_it_has_text() {
+        let content = prepare_content(
+            Some("Fallback-Text".into()),
+            Some("<p>Hallo <b>Max</b></p>".into()),
+        )
+        .unwrap();
+        match content {
+            StageContent::Html {
+                parsed,
+                text_flavor,
+                ..
+            } => {
+                assert!(
+                    parsed.plaintext().contains("Hallo Max"),
+                    "got: {:?}",
+                    parsed.plaintext()
+                );
+                // Der originale Text-Flavor wird für den Clipboard-Fallback
+                // mitgeführt.
+                assert_eq!(text_flavor.as_deref(), Some("Fallback-Text"));
+            }
+            other => panic!("erwartet Html, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_falls_back_to_text_for_image_only_html() {
+        // Nur-Bild-HTML (Review-Befund): der injizierte Platzhalter zählt
+        // NICHT als sichtbarer Text — der Plain-Flavor gewinnt, damit dessen
+        // Inhalt gescannt wird statt einer „[Bild entfernt]"-Bühne.
+        let content = prepare_content(
+            Some("Nur Text".into()),
+            Some(r#"<img src="https://tracker.example/p.gif">"#.into()),
+        )
+        .unwrap();
+        assert!(
+            matches!(&content, StageContent::Plain(t) if t == "Nur Text"),
+            "erwartet Plain-Fallback, got: {content:?}"
+        );
+
+        let empty = prepare_content(Some("Nur Text".into()), Some("<p>  </p>".into())).unwrap();
+        assert!(matches!(&empty, StageContent::Plain(t) if t == "Nur Text"));
+
+        // Nur-Bild-HTML UND leerer Text-Flavor → Fehler-State, keine Bühne
+        // voller Platzhalter.
+        assert!(prepare_content(None, Some(r#"<img src="https://x.example/p.gif">"#.into()))
+            .is_err());
+    }
+
+    #[test]
+    fn prepare_without_html_is_plain() {
+        let content = prepare_content(Some("abc".into()), None).unwrap();
+        assert!(matches!(&content, StageContent::Plain(t) if t == "abc"));
+    }
+
+    #[test]
+    fn prepare_oversized_html_falls_back_to_text() {
+        let big_html = format!("<p>{}</p>", "x".repeat(MAX_CLIPBOARD_BYTES + 1));
+        let content = prepare_content(Some("klein".into()), Some(big_html)).unwrap();
+        assert!(matches!(&content, StageContent::Plain(t) if t == "klein"));
+    }
+
+    #[test]
+    fn prepare_empty_everything_is_error() {
+        assert!(prepare_content(None, None).is_err());
+        assert!(prepare_content(Some(String::new()), Some(String::new())).is_err());
+    }
+
+    // ----------------------------------------------------- Anzeige-Caps (Stufe 2)
+
+    #[test]
+    fn display_fits_checks_both_caps() {
+        assert!(html_display_fits("kurz", "<p>kurz</p>"));
+        // Zeichen-Cap überschritten → Plain-Preview.
+        let long_text = "x".repeat(SEGMENT_CHAR_CAP + 1);
+        assert!(!html_display_fits(&long_text, "<p>ok</p>"));
+        // Byte-Cap überschritten (z. B. data:-Bilder) trotz kurzem Text →
+        // Plain-Preview (Review-Befund: Multi-MB-DOM friert die Bühne ein).
+        let heavy_html = format!(
+            r#"<p>kurz</p><img src="data:image/png;base64,{}">"#,
+            "A".repeat(ANNOTATED_HTML_DISPLAY_CAP_BYTES)
+        );
+        assert!(!html_display_fits("kurz", &heavy_html));
+    }
+
+    // ----------------------------------------------------- Text-Flavor-Fallback
+
+    #[test]
+    fn text_flavor_redaction_keeps_source_text_shape() {
+        // Der Clipboard-Text-Fallback kommt aus dem ORIGINALEN Plain-Flavor
+        // (Listennummern etc. bleiben) — geschwärzt mit derselben case_id,
+        // damit die Tokens zu denen der HTML-Fassung passen.
+        let case_id = secrets::new_case_id();
+        let source = "1. Schreib an max.mustermann@example.de\n2. Danach abschicken";
+        let redacted = redact_text_flavor(source, false, &case_id);
+        assert!(!redacted.contains("max.mustermann@example.de"));
+        assert!(redacted.contains("1. Schreib an"), "got: {redacted}");
+        assert!(redacted.contains("2. Danach abschicken"), "got: {redacted}");
+
+        // Token-Konsistenz: gleiche case_id → gleiches Token für dieselbe
+        // Fundstelle wie im (HTML-)Detection-Pfad.
+        let html_findings =
+            detection::detect_with_case("Mail: max.mustermann@example.de", &case_id);
+        let token = &html_findings
+            .iter()
+            .find(|f| f.entity_type == "email")
+            .expect("Mail muss erkannt werden")
+            .token;
+        assert!(redacted.contains(token.as_str()), "got: {redacted}");
+    }
+
+    #[test]
+    fn text_flavor_redaction_strict_uses_placeholders() {
+        let redacted = redact_text_flavor("Mail: max.mustermann@example.de", true, "egal");
+        assert!(!redacted.contains("max.mustermann@example.de"));
+        assert!(redacted.contains("anonymisierte Platzhalter"), "Strict-Hint fehlt: {redacted}");
+    }
+
+    // ----------------------------------------------------- finalize_redacted_html
+
+    #[test]
+    fn html_hint_appended_only_with_findings() {
+        let plain = finalize_redacted_html("<p>x</p>".into(), "reversible", 0);
+        assert_eq!(plain, "<p>x</p>");
+
+        let hinted = finalize_redacted_html("<p>«P_a»</p>".into(), "reversible", 1);
+        assert!(hinted.starts_with("<p>«P_a»</p><hr><p>Hinweis:"), "got: {hinted}");
+        assert!(!hinted.contains("<script"));
+
+        let strict = finalize_redacted_html("<p>«Person A»</p>".into(), "strict", 2);
+        assert!(strict.contains("anonymisierte Platzhalter"), "got: {strict}");
     }
 }

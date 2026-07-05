@@ -21,7 +21,13 @@
         confidence: number;
       };
 
-  type Payload = { title: string; note: string; segments: Segment[] };
+  type Payload = {
+    title: string;
+    note: string;
+    segments: Segment[];
+    // Stufe 2: gesetzt → HTML-Modus (segments wird ignoriert).
+    annotatedHtml?: string;
+  };
 
   // --- Payload 1: kurzer Text, 3 Findings, mit Umlauten ---
   const kurz: Segment[] = [
@@ -139,10 +145,21 @@
     },
   ];
 
+  // --- Payload 4: HTML-Modus (Stufe 2) — annotiertes Dokument wie es
+  // richtext::redact liefert, inkl. Finding über eine Tag-Grenze
+  // (Fortsetzungs-Span mit data-sz-cont) und Tabelle.
+  const htmlAnnotated = [
+    '<p>Sehr geehrter <span data-sz-finding data-original="Herr Müller" data-replacement="«P_a4b»" data-entity-type="person" data-confidence="0.93">Herr Müller</span>,</p>',
+    '<p>Ihre IBAN <b><span data-sz-finding data-original="DE89370400440532013000" data-replacement="«IBAN_7f2»" data-entity-type="iban" data-confidence="0.99">DE89370400440532013000</span></b> wurde belastet.</p>',
+    "<table><tbody><tr><td><b>Kontakt</b></td><td><span data-sz-finding data-original=\"anna.schaefer@example.de\" data-replacement=\"«MAIL_1»\" data-entity-type=\"email\" data-confidence=\"0.97\">anna.schaefer@example.de</span></td></tr></tbody></table>",
+    '<p style="color: #6b21a8">Grüße von <span data-sz-finding data-original="Max Mustermann" data-replacement="«P_x9z»" data-entity-type="person" data-confidence="0.94">Max </span><b><span data-sz-finding data-sz-cont data-replacement="" data-entity-type="person" data-confidence="0.94">Mustermann</span></b></p>',
+  ].join("");
+
   const payloads: Payload[] = [
     { title: "Kurz · 3 Findings (mit Umlauten)", note: "Enthält ein Finding mit niedriger Confidence (0,61) — Balken-Optik ist bewusst für alle gleich (einheitlich schwarz).", segments: kurz },
     { title: "Lang · 15 Findings", note: "Testet Wellen-Parallelisierung und das Gesamtbudget bei vielen Fundstellen.", segments: lang },
     { title: "Leer · 0 Findings", note: "Reiner Text — die Komponente meldet sofort fertig.", segments: leer },
+    { title: "HTML · 4 Findings (Stufe 2)", note: "Formatiertes Dokument mit Fettdruck, Tabelle und einem Finding über eine Tag-Grenze (Max <b>Mustermann</b> — der zweite Teil kollabiert zu Leere).", segments: [], annotatedHtml: htmlAnnotated },
   ];
 
   type Style = "slow" | "normal" | "fast" | "off";
@@ -209,6 +226,8 @@
           {#key runToken[i]}
             <MarkerText
               segments={p.segments}
+              contentKind={p.annotatedHtml ? "html" : "plain"}
+              annotatedHtml={p.annotatedHtml ?? ""}
               animation={activeStyle[i]}
               on:done={() => onDone(i)}
             />

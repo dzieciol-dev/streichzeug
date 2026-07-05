@@ -26,9 +26,10 @@
 
   const dispatch = createEventDispatcher<{ close: null; showStash: null }>();
 
-  // Fehler-State: leere Segmente (nichts markiert / leeres Clipboard / zu groß).
-  // Wird direkt gezeigt, ohne Animation (es gibt nichts zu animieren).
-  $: isError = !job.segments || job.segments.length === 0;
+  // Fehler-State: nichts anzuzeigen — weder Segmente (plain) noch
+  // annotiertes HTML (Stufe 2). Wird direkt gezeigt, ohne Animation.
+  $: isError =
+    (!job.segments || job.segments.length === 0) && !job.annotated_html;
   $: hasFindings = job.finding_count >= 1 && job.stash_id != null;
 
   // Bei Fehler-State ist die Animation sofort „durch"; sonst wartet die
@@ -68,7 +69,13 @@
   {:else}
     <div class="stage">
       {#key job.job_id}
-        <MarkerText segments={job.segments} {animation} on:done={onDone} />
+        <MarkerText
+          segments={job.segments}
+          contentKind={job.annotated_html ? "html" : "plain"}
+          annotatedHtml={job.annotated_html ?? ""}
+          {animation}
+          on:done={onDone}
+        />
       {/key}
     </div>
 
@@ -82,7 +89,18 @@
           </p>
           {#if job.truncated}
             <p class="hint">
-              Anzeige gekürzt — Clipboard und Ablage enthalten den vollständigen Text.
+              {#if job.content_kind === "html"}
+                Anzeige gekürzt und ohne Formatierung — Clipboard und Ablage
+                enthalten die vollständige formatierte Fassung.
+              {:else}
+                Anzeige gekürzt — Clipboard und Ablage enthalten den vollständigen Text.
+              {/if}
+            </p>
+          {/if}
+          {#if job.content_kind === "html" && !job.truncated}
+            <p class="hint">
+              Formatierung bleibt erhalten — im Clipboard liegen die
+              formatierte und eine Text-Fassung.
             </p>
           {/if}
           <div class="actions">

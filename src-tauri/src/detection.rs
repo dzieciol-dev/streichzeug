@@ -418,7 +418,7 @@ pub fn apply_tokens(text: &str, findings: &[Finding], _case_id: &str) -> String 
 /// LLM-Hinweis, der ans Ende eines pseudonymisierten Texts gehängt wird —
 /// erklärt dem Modell, was die Marker bedeuten, und bittet um unveränderte
 /// Übernahme. Kurz gehalten (kostet sonst Tokens und Aufmerksamkeit).
-const LLM_HINT: &str =
+pub(crate) const LLM_HINT: &str =
     "\n\n---\nHinweis: Die Marker im Format «X_yyy» im obigen Text sind Pseudonyme für \
      personenbezogene Daten. Bitte exakt so in deiner Antwort übernehmen — nicht verändern, \
      übersetzen oder ergänzen. Sie werden anschließend automatisch zurück übersetzt.";
@@ -440,7 +440,7 @@ pub fn apply_tokens_with_hint(text: &str, findings: &[Finding], case_id: &str) -
 /// Strict-Mode-LLM-Hint. Klartext-Platzhalter statt Token-Pattern, plus
 /// kein „werden automatisch zurück übersetzt"-Versprechen — im Strict
 /// Mode gibt's keine Reverse-Phase.
-const LLM_HINT_STRICT: &str =
+pub(crate) const LLM_HINT_STRICT: &str =
     "\n\n---\nHinweis: Die Marker im Format «Person A», «Organisation B», «Ort C» etc. \
      im obigen Text sind anonymisierte Platzhalter für personenbezogene Daten. \
      Bitte exakt so in deiner Antwort übernehmen — nicht verändern, übersetzen oder ergänzen.";
@@ -606,8 +606,41 @@ fn collect_phones(text: &str, out: &mut Vec<Finding>, secret: &[u8]) {
         if !(6..=16).contains(&digit_count) {
             continue;
         }
+        // Hex-Literale (`0x…`) und Hashes rutschen sonst als „Telefonnummer"
+        // durch — `(?:^|\D)` im Pattern lässt das `x` bzw. einen Hex-Buchstaben
+        // als Begrenzer zu.
+        if is_part_of_hex_sequence(text, m.start(), m.end()) {
+            continue;
+        }
         push_finding(out, EntityType::Phone, original, m.start(), m.end(), 0.85, secret);
     }
+}
+
+/// Prüft, ob der Kandidat (`text[start..end]`, reine Ziffernfolge ggf. mit
+/// Trennzeichen) in Wahrheit Teil eines Hex-Literals oder einer Hex-Sequenz
+/// ist:
+///
+/// 1. **`0x`/`0X`-Präfix** — direkt vor dem Kandidaten, ggf. über weitere
+///    Hex-Ziffern hinweg (`0xdead0123456789` → Kandidat `0123456789`).
+/// 2. **Nahtloser Übergang in Hex-Buchstaben** (a–f/A–F) unmittelbar vor
+///    oder nach dem Kandidaten — typisch für Git-SHAs und andere Hashes
+///    (`0891234deadbeef`). Echte Telefonnummern kleben nie ohne Trennzeichen
+///    an einem Buchstaben.
+fn is_part_of_hex_sequence(text: &str, start: usize, end: usize) -> bool {
+    let prefix = &text[..start];
+
+    // Fall 1: rückwärts über Hex-Ziffern bis zu einem etwaigen `0x`-Präfix.
+    let before_hex_run = prefix.trim_end_matches(|c: char| c.is_ascii_hexdigit());
+    if (before_hex_run.ends_with('x') || before_hex_run.ends_with('X'))
+        && before_hex_run[..before_hex_run.len() - 1].ends_with('0')
+    {
+        return true;
+    }
+
+    // Fall 2: direkt angrenzende Hex-Buchstaben.
+    let is_hex_letter = |c: char| c.is_ascii_hexdigit() && c.is_ascii_alphabetic();
+    prefix.chars().next_back().is_some_and(is_hex_letter)
+        || text[end..].chars().next().is_some_and(is_hex_letter)
 }
 
 /// IBAN — Form-Match + mod-97-Prüfsumme via `iban_validate`-Crate.
@@ -985,6 +1018,51 @@ mod tests {
             "expected at least 1 phone, got: {:?}",
             f
         );
+    }
+
+    #[test]
+    fn rejects_hex_literal_as_phone() {
+        // Crash-Report-Schnipsel (Issue #22): `0x…` ist keine Telefonnummer.
+        let f = detect("Exception at address 0x0000000000000001 in module foo.dll");
+        assert!(!f.iter().any(|x| x.entity_type == "phone"), "got: {:?}", f);
+    }
+
+    #[test]
+    fn rejects_uppercase_hex_literal_as_phone() {
+        let f = detect("Register RAX=0X0000000000123456");
+        assert!(!f.iter().any(|x| x.entity_type == "phone"), "got: {:?}", f);
+    }
+
+    #[test]
+    fn rejects_digit_run_inside_hex_literal_as_phone() {
+        // Ziffernfolge mitten im Hex-Literal, durch Hex-Buchstaben vom `0x` getrennt.
+        let f = detect("Pointer 0xdead0123456789 dereferenziert");
+        assert!(!f.iter().any(|x| x.entity_type == "phone"), "got: {:?}", f);
+    }
+
+    #[test]
+    fn rejects_git_sha_as_phone() {
+        // Hash ohne `0x`-Präfix: Ziffernfolge geht nahtlos in Hex-Buchstaben über.
+        let f = detect("Gefixt in Commit 0891234567deadbeef003a4b5c6d7e8f90112233.");
+        assert!(!f.iter().any(|x| x.entity_type == "phone"), "got: {:?}", f);
+    }
+
+    #[test]
+    fn detects_phone_next_to_hex_literal() {
+        // Der Hex-Guard darf echte Nummern im selben Text nicht mitreißen.
+        let f = detect("Fehler 0x0000000000000001 aufgetreten — Support: 089/12345678.");
+        let phones: Vec<_> = f.iter().filter(|x| x.entity_type == "phone").collect();
+        assert_eq!(phones.len(), 1, "got: {:?}", f);
+        assert!(phones[0].original.starts_with("089"));
+    }
+
+    #[test]
+    fn rejects_hex_literal_as_steuer_id() {
+        // 11 Ziffern im Hex-Literal, sogar mit Kontextwort davor: `\b` im
+        // Kandidaten-Pattern verhindert den Match nach `x` — festgenagelt,
+        // damit eine künftige Pattern-Änderung das nicht still aufweicht.
+        let f = detect("IdNr im Speicherdump: 0x12345678901");
+        assert!(!f.iter().any(|x| x.entity_type == "steuer_id"), "got: {:?}", f);
     }
 
     #[test]

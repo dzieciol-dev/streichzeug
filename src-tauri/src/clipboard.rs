@@ -123,6 +123,52 @@ pub fn write_clipboard_text(text: &str) -> Result<(), String> {
     }
 }
 
+/// Liefert den HTML-Flavor des System-Clipboards (macOS `public.html`,
+/// Windows `CF_HTML` — dort bereits vom Header-Envelope befreit). `None`,
+/// wenn kein HTML anliegt oder die Plattform es nicht unterstützt.
+///
+/// Der Inhalt ist **ungeprüftes Fremd-HTML** — Aufrufer MÜSSEN es durch
+/// [`crate::richtext::sanitize`] schicken, bevor es gerendert oder
+/// gespeichert wird.
+pub fn read_clipboard_html() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_impl::read_html()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: gleiche Threading-Annahme wie read_text (Read-Calls auf
+        // generalPasteboard sind praktisch thread-safe, s. macos_impl-Doc).
+        unsafe { macos_impl::read_html() }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Schreibt HTML **und** Plain-Text-Fallback in einem Zug ins Clipboard
+/// (ein `clearContents`/`empty`, dann beide Flavors — Ziel-Apps ohne
+/// HTML-Support bekommen den Text). `Err` als String bei OS-Fehlern.
+pub fn write_clipboard_html(html: &str, text_fallback: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_impl::write_html(html, text_fallback)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: clearContents + zweimal setString — kein Aliasing.
+        unsafe { macos_impl::write_html(html, text_fallback) };
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = html;
+        let _ = text_fallback;
+        Err("unsupported platform".to_string())
+    }
+}
+
 // Linux/Unbekannt: kein Watcher — Detection läuft dann nur über die UI.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod stub_impl {

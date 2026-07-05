@@ -418,7 +418,7 @@ pub fn apply_tokens(text: &str, findings: &[Finding], _case_id: &str) -> String 
 /// LLM-Hinweis, der ans Ende eines pseudonymisierten Texts gehängt wird —
 /// erklärt dem Modell, was die Marker bedeuten, und bittet um unveränderte
 /// Übernahme. Kurz gehalten (kostet sonst Tokens und Aufmerksamkeit).
-const LLM_HINT: &str =
+pub(crate) const LLM_HINT: &str =
     "\n\n---\nHinweis: Die Marker im Format «X_yyy» im obigen Text sind Pseudonyme für \
      personenbezogene Daten. Bitte exakt so in deiner Antwort übernehmen — nicht verändern, \
      übersetzen oder ergänzen. Sie werden anschließend automatisch zurück übersetzt.";
@@ -440,7 +440,7 @@ pub fn apply_tokens_with_hint(text: &str, findings: &[Finding], case_id: &str) -
 /// Strict-Mode-LLM-Hint. Klartext-Platzhalter statt Token-Pattern, plus
 /// kein „werden automatisch zurück übersetzt"-Versprechen — im Strict
 /// Mode gibt's keine Reverse-Phase.
-const LLM_HINT_STRICT: &str =
+pub(crate) const LLM_HINT_STRICT: &str =
     "\n\n---\nHinweis: Die Marker im Format «Person A», «Organisation B», «Ort C» etc. \
      im obigen Text sind anonymisierte Platzhalter für personenbezogene Daten. \
      Bitte exakt so in deiner Antwort übernehmen — nicht verändern, übersetzen oder ergänzen.";

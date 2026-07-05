@@ -231,11 +231,32 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             mode          TEXT NOT NULL,
             title         TEXT NOT NULL,
             redacted_text TEXT NOT NULL,
-            entity_counts TEXT NOT NULL
+            entity_counts TEXT NOT NULL,
+            -- Stufe 2 (Formatierung): 'plain' | 'html'. Bei 'html' hält
+            -- redacted_html die geschwärzte formatierte Fassung — ebenfalls
+            -- NUR geschwärzt, nie Original (gleiche Strict-Mode-Garantie).
+            content_kind  TEXT NOT NULL DEFAULT 'plain',
+            redacted_html TEXT
         );
         "#,
     )?;
+    migrate_stash_rich_columns(conn);
     Ok(())
+}
+
+/// Idempotente Migration für Bestands-DBs aus Stufe 1: ergänzt die beiden
+/// Stufe-2-Spalten. `ALTER TABLE ADD COLUMN` schlägt fehl, wenn die Spalte
+/// schon existiert (frische DB über das CREATE oben, oder zweiter Lauf) —
+/// dieser Fehler ist der Normalfall und wird bewusst verschluckt.
+fn migrate_stash_rich_columns(conn: &Connection) {
+    for ddl in [
+        "ALTER TABLE stash ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'plain'",
+        "ALTER TABLE stash ADD COLUMN redacted_html TEXT",
+    ] {
+        if let Err(e) = conn.execute(ddl, []) {
+            log::debug!("storage: stash-Migration übersprungen ({e})");
+        }
+    }
 }
 
 // =================================================================== Public API
@@ -445,6 +466,9 @@ pub struct StashMeta {
     /// Zeichen-Länge (nicht Bytes) des geschwärzten Volltexts — für eine
     /// aussagekräftige Größenanzeige unabhängig von Umlauten/Emoji.
     pub char_len: usize,
+    /// `"plain"` | `"html"` — bei `"html"` kopiert [`stash_copy`] beide
+    /// Flavors (formatiert + Text-Fallback).
+    pub content_kind: String,
 }
 
 /// Kürzt einen Text auf einen kompakten Listen-Titel: Whitespace-Läufe zu
@@ -458,12 +482,14 @@ fn stash_title(raw: &str) -> String {
     collapsed.chars().take(60).collect()
 }
 
-/// Legt einen Ablage-Eintrag an und liefert dessen `rowid`. `entity_counts`
-/// wird als JSON-Objekt (`{"person":2,"iban":1}`) serialisiert, damit die
-/// Chip-Anzeige im Frontend die Typen ohne Zusatztabelle rekonstruiert.
+/// Legt einen Plain-Text-Ablage-Eintrag an und liefert dessen `rowid`.
+/// `entity_counts` wird als JSON-Objekt (`{"person":2,"iban":1}`)
+/// serialisiert, damit die Chip-Anzeige im Frontend die Typen ohne
+/// Zusatztabelle rekonstruiert.
 ///
-/// `#[allow(dead_code)]`: der einzige Nicht-Test-Aufrufer ist der Capture-Flow
-/// aus WP-A; bis dessen Merge hat die Funktion in diesem Crate keinen Caller.
+/// `#[allow(dead_code)]`: der Capture-Flow ruft seit Stufe 2 direkt
+/// [`stash_insert_rich`]; dieser Convenience-Wrapper bleibt als Plain-API
+/// (und wird von den Tests genutzt).
 #[allow(dead_code)]
 pub fn stash_insert(
     mode: &str,
@@ -471,12 +497,27 @@ pub fn stash_insert(
     redacted_text: &str,
     entity_counts: &HashMap<String, u32>,
 ) -> i64 {
+    stash_insert_rich(mode, title, redacted_text, entity_counts, "plain", None)
+}
+
+/// Wie [`stash_insert`], aber mit Content-Kind und optionaler geschwärzter
+/// HTML-Fassung (Stufe 2). Auch das HTML ist IMMER die geschwärzte Fassung —
+/// Original-HTML wird nie gespeichert.
+pub fn stash_insert_rich(
+    mode: &str,
+    title: &str,
+    redacted_text: &str,
+    entity_counts: &HashMap<String, u32>,
+    content_kind: &str,
+    redacted_html: Option<&str>,
+) -> i64 {
     let title = stash_title(title);
     let counts_json = serde_json::to_string(entity_counts).unwrap_or_else(|_| "{}".to_string());
     let conn = CONN.lock().expect("CONN mutex poisoned");
     match conn.execute(
-        "INSERT INTO stash (mode, title, redacted_text, entity_counts) VALUES (?1, ?2, ?3, ?4)",
-        params![mode, title, redacted_text, counts_json],
+        "INSERT INTO stash (mode, title, redacted_text, entity_counts, content_kind, redacted_html) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![mode, title, redacted_text, counts_json, content_kind, redacted_html],
     ) {
         Ok(_) => conn.last_insert_rowid(),
         Err(e) => {
@@ -492,7 +533,7 @@ pub fn stash_insert(
 pub fn stash_list() -> Vec<StashMeta> {
     let conn = CONN.lock().expect("CONN mutex poisoned");
     let mut stmt = match conn.prepare(
-        "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), mode, title, entity_counts, length(redacted_text) \
+        "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), mode, title, entity_counts, length(redacted_text), content_kind \
          FROM stash ORDER BY id DESC",
     ) {
         Ok(s) => s,
@@ -512,6 +553,7 @@ pub fn stash_list() -> Vec<StashMeta> {
             title: row.get(3)?,
             entity_counts,
             char_len: row.get::<_, i64>(5)? as usize,
+            content_kind: row.get(6)?,
         })
     });
     match rows {
@@ -538,11 +580,36 @@ pub fn stash_get_text(id: i64) -> Result<String, String> {
     })
 }
 
-/// Schreibt den geschwärzten Volltext eines Eintrags ins System-Clipboard —
-/// „Nochmal kopieren" aus der Ablage.
+/// Schreibt den geschwärzten Inhalt eines Eintrags ins System-Clipboard —
+/// „Nochmal kopieren" aus der Ablage. HTML-Einträge werden mit beiden
+/// Flavors kopiert (formatiert + Text-Fallback); schlägt der Rich-Write
+/// fehl, bleibt der Text-Write als Fallback.
 pub fn stash_copy(id: i64) -> Result<(), String> {
-    let text = stash_get_text(id)?;
+    let (text, html) = stash_get_content(id)?;
+    if let Some(html) = html {
+        match crate::clipboard::write_clipboard_html(&html, &text) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                log::warn!("storage: stash_copy rich write failed ({e}) — Text-Fallback");
+            }
+        }
+    }
     crate::clipboard::write_clipboard_text(&text)
+}
+
+/// Liefert `(redacted_text, redacted_html)` eines Eintrags. `Err`, wenn die
+/// ID nicht (mehr) existiert.
+fn stash_get_content(id: i64) -> Result<(String, Option<String>), String> {
+    let conn = CONN.lock().expect("CONN mutex poisoned");
+    conn.query_row(
+        "SELECT redacted_text, redacted_html FROM stash WHERE id = ?1",
+        params![id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => format!("Ablage-Eintrag {id} nicht gefunden"),
+        other => other.to_string(),
+    })
 }
 
 /// Löscht einen einzelnen Eintrag. Idempotent: eine bereits fehlende ID ist
@@ -860,5 +927,53 @@ mod tests {
         let removed = stash_clear();
         assert_eq!(removed, 2);
         assert!(stash_list().is_empty());
+    }
+
+    #[test]
+    fn stash_plain_insert_defaults_to_plain_kind() {
+        let _guard = stash_test_guard();
+        let id = stash_insert("reversible", "t", "text", &HashMap::new());
+        let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(meta.content_kind, "plain");
+        let (text, html) = stash_get_content(id).unwrap();
+        assert_eq!(text, "text");
+        assert!(html.is_none(), "plain-Eintrag hat kein redacted_html");
+    }
+
+    #[test]
+    fn stash_rich_insert_roundtrip() {
+        let _guard = stash_test_guard();
+        let id = stash_insert_rich(
+            "reversible",
+            "«P_a» im Titel",
+            "«P_a» im Text",
+            &counts(&[("person", 1)]),
+            "html",
+            Some("<p>«P_a» im <b>Text</b></p>"),
+        );
+        assert!(id > 0);
+        let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(meta.content_kind, "html");
+        // char_len bezieht sich weiterhin auf den Text, nicht das HTML.
+        assert_eq!(meta.char_len, "«P_a» im Text".chars().count());
+        let (text, html) = stash_get_content(id).unwrap();
+        assert_eq!(text, "«P_a» im Text");
+        assert_eq!(html.as_deref(), Some("<p>«P_a» im <b>Text</b></p>"));
+    }
+
+    #[test]
+    fn stash_migration_is_idempotent() {
+        let _guard = stash_test_guard();
+        // init_schema (inkl. Migration) lief beim CONN-Aufbau schon einmal —
+        // ein erneuter Lauf gegen dieselbe Verbindung darf weder fehlschlagen
+        // noch Daten anfassen.
+        let id = stash_insert("strict", "bleibt", "bleibt", &HashMap::new());
+        {
+            let conn = CONN.lock().expect("CONN mutex poisoned");
+            init_schema(&conn).expect("zweiter init_schema-Lauf muss idempotent sein");
+        }
+        let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(meta.title, "bleibt");
+        assert_eq!(meta.content_kind, "plain");
     }
 }

@@ -27,6 +27,7 @@ mod foreground; // Foreground-App-Detektion (nur bei Auto-Detection genutzt)
 mod gazetteer; // statische DE-Namensliste für Layer 2
 mod hotkey; // Smart-Paste-Handler (primäre UX)
 mod ner; // Layer-3 NER (optional, feature = "ner")
+mod richtext; // Stufe 2: HTML-Sanitizing + Finding-Mapping (reine Logik)
 mod secrets; // HMAC-Master-Secret-Verwaltung
 mod settings; // User-Settings (Hotkey, Auto-Detection-Toggle)
 mod stage; // Schwärz-Bühne: Capture-Flow des sichtbaren zweiten Workflows

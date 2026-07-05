@@ -155,3 +155,38 @@ pub(super) unsafe fn write_text(text: &str) {
     let ns_text = NSString::from_str(text);
     let _ = pb.setString_forType(&ns_text, &ns_type);
 }
+
+/// Liest den HTML-Flavor (`public.html`) der allgemeinen Pasteboard. Word,
+/// Outlook und Browser legen ihn beim Kopieren formatierter Inhalte neben den
+/// Plain-Text. Gleiche Prompt-Vorsicht wie [`read_text`]: erst nach einer
+/// gemeldeten Änderung aufrufen.
+///
+/// # Safety
+///
+/// Gleiche Threading-Annahme wie [`current_change_count`].
+pub(super) unsafe fn read_html() -> Option<String> {
+    let pb = NSPasteboard::generalPasteboard();
+    let ns_type = NSString::from_str("public.html");
+    pb.stringForType(&ns_type).map(|s| s.to_string())
+}
+
+/// Schreibt HTML- und Plain-Text-Flavor in einem Zug: EIN `clearContents`,
+/// dann beide `setString_forType` — so sieht jede Ziel-App genau einen
+/// konsistenten Clipboard-Zustand (formatiert für Word/Outlook, Text für
+/// alles andere).
+///
+/// # Safety
+///
+/// Gleiche Threading-Annahme wie [`current_change_count`].
+pub(super) unsafe fn write_html(html: &str, text_fallback: &str) {
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    let _ = pb.setString_forType(
+        &NSString::from_str(html),
+        &NSString::from_str("public.html"),
+    );
+    let _ = pb.setString_forType(
+        &NSString::from_str(text_fallback),
+        &NSString::from_str("public.utf8-plain-text"),
+    );
+}

@@ -28,13 +28,22 @@
   };
   type Segment = TextSegment | FindingSegment;
 
-  // --- Props (Vertrag 2.6) ---
+  // --- Props (Vertrag 2.6, Stufe-2-Erweiterung) ---
   export let segments: Segment[] = [];
   // "full" ist der Legacy-Wert früher gespeicherter Settings und wird wie
   // "normal" behandelt (siehe Normalisierung in onMount).
   export let animation: "slow" | "normal" | "fast" | "off" | "full" = "normal";
+  // Stufe 2: bei "html" wird annotatedHtml gerendert (backend-sanitisiert,
+  // Fundstellen als <span data-sz-finding …>) und dieselbe Marker-Animation
+  // läuft über den Spans. segments wird dann ignoriert.
+  export let contentKind: "plain" | "html" = "plain";
+  export let annotatedHtml: string = "";
 
   const dispatch = createEventDispatcher<{ done: null }>();
+
+  // Wurzel des {@html}-Renderings — die Finding-Spans werden nach Mount per
+  // querySelectorAll eingesammelt und mit den Animations-Layern bestückt.
+  let htmlRoot: HTMLElement | null = null;
 
   // Timing je Stil in ms. Nur transform/opacity werden hierüber angesteuert.
   //  - stroke  : Dauer, in der der Strich von links über das Original zieht
@@ -73,6 +82,44 @@
     timers.push(window.setTimeout(fn, ms));
   }
 
+  // HTML-Modus: sammelt die backend-annotierten Spans ein und bestückt sie
+  // mit denselben drei Layern wie ein Plain-Finding (Original / Ersatz /
+  // Strich). Fortsetzungs-Spans (`data-sz-cont`, Finding über Tag-Grenze)
+  // bekommen ein leeres Replacement — ihr Balken bleibt stehen, der Token
+  // erscheint nur auf dem ersten Teil.
+  function prepareHtmlFindings(): HTMLElement[] {
+    if (!htmlRoot) return [];
+    const spans = Array.from(
+      htmlRoot.querySelectorAll<HTMLElement>("[data-sz-finding]")
+    );
+    for (const span of spans) {
+      const original = span.textContent ?? "";
+      const replacement = span.hasAttribute("data-sz-cont")
+        ? ""
+        : (span.getAttribute("data-replacement") ?? "");
+      span.textContent = "";
+      const orig = document.createElement("span");
+      orig.className = "layer original";
+      orig.textContent = original;
+      const repl = document.createElement("code");
+      repl.className = "layer replacement";
+      repl.textContent = replacement;
+      const stroke = document.createElement("span");
+      stroke.className = "layer stroke";
+      stroke.setAttribute("aria-hidden", "true");
+      span.append(orig, repl, stroke);
+      span.classList.add("finding", "idle");
+      const entity = span.getAttribute("data-entity-type");
+      if (entity) span.title = entity;
+    }
+    return spans;
+  }
+
+  function setElementPhase(el: HTMLElement, phase: string): void {
+    el.classList.remove("idle", "strike", "reveal", "done");
+    el.classList.add(phase);
+  }
+
   onMount(() => {
     // prefers-reduced-motion wird wie "off" behandelt: sofort Endzustand.
     // Legacy-Wert "full" (frühere Settings) läuft als "normal".
@@ -81,10 +128,21 @@
     const effective: "slow" | "normal" | "fast" | "off" =
       normalized === "off" || prefersReducedMotion() ? "off" : normalized;
 
-    if (effective === "off") {
+    // Einheitliche Sicht auf die animierbaren Fundstellen: Segment-Indizes
+    // (plain) bzw. DOM-Spans (html) — die Choreografie darunter ist identisch.
+    const units: ((phase: string) => void)[] =
+      contentKind === "html"
+        ? prepareHtmlFindings().map((el) => (p: string) => setElementPhase(el, p))
+        : segments
+            .map((seg, i) => (seg.kind === "finding" ? i : -1))
+            .filter((i) => i >= 0)
+            .map((i) => (p: string) => setPhase(i, p));
+
+    if (effective === "off" || units.length === 0) {
       strokeMs = 0;
       crossMs = 0;
       phases = segments.map(() => "done");
+      units.forEach((set) => set("done"));
       later(0, () => dispatch("done"));
       return;
     }
@@ -93,31 +151,20 @@
     strokeMs = t.stroke;
     crossMs = t.cross;
 
-    const findingIndices = segments
-      .map((seg, i) => (seg.kind === "finding" ? i : -1))
-      .filter((i) => i >= 0);
-
-    // Reiner Text ohne Findings: direkt fertig.
-    if (findingIndices.length === 0) {
-      phases = segments.map(() => "done");
-      later(0, () => dispatch("done"));
-      return;
-    }
-
     // Staffelung: Grund-Versatz 70 ms (bzw. 24 ms). Bei vielen Findings wird
     // der Versatz so gestaucht, dass das Gesamtbudget hält — dadurch laufen
     // späte Findings in überlappenden Wellen parallel (ab ~10 Findings sichtbar).
     const perFinding = t.stroke + t.cross;
     const maxSpread = Math.max(0, t.budget - perFinding);
-    const n = findingIndices.length;
+    const n = units.length;
     const stagger = n > 1 ? Math.min(t.stagger, maxSpread / (n - 1)) : 0;
 
     let lastEnd = 0;
-    findingIndices.forEach((segIndex, k) => {
+    units.forEach((set, k) => {
       const start = Math.round(k * stagger);
-      later(start, () => setPhase(segIndex, "strike"));
-      later(start + t.stroke, () => setPhase(segIndex, "reveal"));
-      later(start + perFinding, () => setPhase(segIndex, "done"));
+      later(start, () => set("strike"));
+      later(start + t.stroke, () => set("reveal"));
+      later(start + perFinding, () => set("done"));
       lastEnd = Math.max(lastEnd, start + perFinding);
     });
 
@@ -130,7 +177,17 @@
   });
 </script>
 
-<span class="marker-text" style="--stroke-ms:{strokeMs}ms; --cross-ms:{crossMs}ms">{#each segments as seg, i (i)}{#if seg.kind === "text"}<span class="txt">{seg.content}</span>{:else}<span class="finding {phases[i] ?? 'idle'}" title={seg.entity_type}><span class="layer original">{seg.original}</span><code class="layer replacement">{seg.replacement}</code><span class="layer stroke" aria-hidden="true"></span></span>{/if}{/each}</span>
+{#if contentKind === "html"}
+  <!-- annotated_html ist backend-sanitisiert (ammonia-Allowlist); die CSP
+       (kein Remote-Load) ist die zweite Verteidigungslinie. -->
+  <div
+    class="marker-text marker-html"
+    bind:this={htmlRoot}
+    style="--stroke-ms:{strokeMs}ms; --cross-ms:{crossMs}ms"
+  >
+    {@html annotatedHtml}
+  </div>
+{:else}<span class="marker-text" style="--stroke-ms:{strokeMs}ms; --cross-ms:{crossMs}ms">{#each segments as seg, i (i)}{#if seg.kind === "text"}<span class="txt">{seg.content}</span>{:else}<span class="finding {phases[i] ?? 'idle'}" title={seg.entity_type}><span class="layer original">{seg.original}</span><code class="layer replacement">{seg.replacement}</code><span class="layer stroke" aria-hidden="true"></span></span>{/if}{/each}</span>{/if}
 
 <style>
   .marker-text {
@@ -235,6 +292,91 @@
     .original,
     .replacement,
     .stroke {
+      transition: none;
+    }
+  }
+
+  /* ------------------------------------------------------ HTML-Modus
+     Die Finding-Spans und ihre Layer entstehen per JS aus dem {@html}-
+     Inhalt — Svelte-Scoping greift dort nicht, daher :global unter dem
+     .marker-html-Scope. Die Regeln spiegeln 1:1 die Plain-Regeln oben. */
+  .marker-html {
+    white-space: normal; /* HTML bringt seine eigene Block-Struktur mit */
+  }
+  .marker-html :global(img) {
+    max-width: 100%;
+    height: auto;
+  }
+  .marker-html :global(table) {
+    border-collapse: collapse;
+  }
+  .marker-html :global(.finding) {
+    position: relative;
+    display: inline-grid;
+    vertical-align: baseline;
+    white-space: pre-wrap;
+  }
+  .marker-html :global(.finding > .layer) {
+    grid-area: 1 / 1;
+  }
+  .marker-html :global(.finding .original) {
+    justify-self: start;
+    opacity: 1;
+    transition: opacity var(--cross-ms) ease;
+  }
+  .marker-html :global(.finding .replacement) {
+    justify-self: center;
+    align-self: center;
+    z-index: 1;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85em;
+    line-height: 1;
+    color: #ffffff;
+    padding: 0 4px;
+    white-space: nowrap;
+    opacity: 0;
+    transition: opacity var(--cross-ms) ease;
+  }
+  .marker-html :global(.finding .stroke) {
+    justify-self: stretch;
+    align-self: center;
+    height: 1.15em;
+    margin: 0 -3px;
+    background:
+      repeating-linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.05) 0 2px,
+        transparent 2px 5px
+      ),
+      #171717;
+    border-radius: 0.35em 0.5em 0.4em 0.55em;
+    transform: rotate(-0.5deg);
+    pointer-events: none;
+    opacity: 0;
+    clip-path: inset(-10% 100% -10% -2%);
+    transition:
+      clip-path var(--stroke-ms) cubic-bezier(0.35, 0.55, 0.3, 1),
+      opacity 130ms ease;
+    will-change: clip-path, opacity;
+  }
+  .marker-html :global(.finding.strike .stroke),
+  .marker-html :global(.finding.reveal .stroke),
+  .marker-html :global(.finding.done .stroke) {
+    opacity: 1;
+    clip-path: inset(-10% -2% -10% -2%);
+  }
+  .marker-html :global(.finding.reveal .original),
+  .marker-html :global(.finding.done .original) {
+    opacity: 0;
+  }
+  .marker-html :global(.finding.reveal .replacement),
+  .marker-html :global(.finding.done .replacement) {
+    opacity: 1;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .marker-html :global(.finding .original),
+    .marker-html :global(.finding .replacement),
+    .marker-html :global(.finding .stroke) {
       transition: none;
     }
   }

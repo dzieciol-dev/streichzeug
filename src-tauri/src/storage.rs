@@ -660,17 +660,22 @@ pub fn stash_get_text(id: i64) -> Result<String, String> {
 pub fn stash_copy(id: i64) -> Result<(), String> {
     let (text, html, image_path) = stash_get_content(id)?;
     if let Some(path) = image_path {
-        match std::fs::read(&path) {
+        // Bild-Eintrag: schlägt der Bild-Weg fehl, wird der Text zwar noch
+        // als Notversorgung kopiert, aber der Aufruf meldet Err — „Bild
+        // kopieren" darf keinen Erfolg anzeigen, wenn kein Bild kopiert
+        // wurde (Review-Befund: still degradierter Text-Fallback).
+        let image_error = match std::fs::read(&path) {
             Ok(png) => match crate::clipboard::write_clipboard_image(&png, &text) {
                 Ok(()) => return Ok(()),
-                Err(e) => {
-                    log::warn!("storage: stash_copy image write failed ({e}) — Text-Fallback");
-                }
+                Err(e) => format!("Bild-Write fehlgeschlagen ({e})"),
             },
-            Err(e) => {
-                log::warn!("storage: stash-Bild {path} nicht lesbar ({e}) — Text-Fallback");
-            }
-        }
+            Err(e) => format!("Ablage-Bild fehlt oder ist nicht lesbar ({e})"),
+        };
+        log::warn!("storage: stash_copy: {image_error} — kopiere nur den Text");
+        let _ = crate::clipboard::write_clipboard_text(&text);
+        return Err(format!(
+            "{image_error} — nur der geschwärzte Text wurde kopiert"
+        ));
     }
     if let Some(html) = html {
         match crate::clipboard::write_clipboard_html(&html, &text) {

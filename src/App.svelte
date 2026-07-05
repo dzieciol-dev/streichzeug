@@ -386,12 +386,21 @@
     void setWidgetVisible((e.currentTarget as HTMLInputElement).checked);
   }
 
-  // Akzeptiert Text-Markierungen (Stufe 1) und Dateien (Stufe 3: Bilder).
+  // Akzeptiert Text-Markierungen (Stufe 1) und BILD-Dateien (Stufe 3).
   // Datei-Drops kommen über HTML5 `dataTransfer.files` — `dragDropEnabled`
   // ist am Main-Window aus, Tauri fängt hier nichts ab (Konzept WP-J).
+  // Nicht-Bild-Dateien (PDF, docx, …) werden schon beim Drag abgelehnt —
+  // der OS-Cursor zeigt dann „nicht erlaubt", statt dass der Drop
+  // angenommen und still verworfen wird. Items ohne Typ-Angabe (manche
+  // Quellen liefern beim Dragover noch keinen MIME-Typ) werden
+  // durchgelassen und erst beim Drop geprüft.
   function isStageDrag(e: DragEvent): boolean {
-    const types = e.dataTransfer?.types;
-    return !!types && (types.includes("text/plain") || types.includes("Files"));
+    const dt = e.dataTransfer;
+    if (!dt) return false;
+    if (dt.types.includes("text/plain")) return true;
+    return Array.from(dt.items ?? []).some(
+      (i) => i.kind === "file" && (i.type === "" || i.type.startsWith("image/"))
+    );
   }
 
   function onDragEnter(e: DragEvent) {

@@ -122,10 +122,17 @@ fn box_from_union(
 
 /// Dekodiert Bild-Bytes (PNG/JPEG/BMP/TIFF) zu RGBA. `Err` bei unbekanntem
 /// Format oder Überschreitung von [`MAX_IMAGE_DIMENSION`].
+///
+/// Der Dimensions-Guard läuft auf den **Header-Daten**, VOR dem
+/// Pixel-Decode — ein hochkomprimiertes Riesen-PNG (11000² Weiß < 10 MB)
+/// würde sonst erst ~0,5 GB RGBA allokieren und dann abgelehnt.
 pub fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
-    let img = image::load_from_memory(bytes)
-        .map_err(|e| format!("Bild nicht dekodierbar: {e}"))?;
-    let (w, h) = (img.width(), img.height());
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("Bildformat nicht erkennbar: {e}"))?;
+    let (w, h) = reader
+        .into_dimensions()
+        .map_err(|e| format!("Bild-Header nicht lesbar: {e}"))?;
     if w == 0 || h == 0 {
         return Err("Bild hat keine Fläche".into());
     }
@@ -134,6 +141,8 @@ pub fn decode_image(bytes: &[u8]) -> Result<image::RgbaImage, String> {
             "Bild zu groß ({w}×{h} px, Limit {MAX_IMAGE_DIMENSION} px pro Seite)"
         ));
     }
+    let img = image::load_from_memory(bytes)
+        .map_err(|e| format!("Bild nicht dekodierbar: {e}"))?;
     Ok(img.to_rgba8())
 }
 
@@ -146,12 +155,36 @@ pub fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
     Ok(out.into_inner())
 }
 
-/// Dekodiert und rekodiert Bild-Bytes als PNG — für die Anzeige-Kopie des
-/// Originals (einheitliches Format fürs Frontend, Metadaten weg).
+/// Dekodiert und rekodiert Bild-Bytes als PNG. Der Produktions-Flow nutzt
+/// decode_image + encode_png getrennt (er braucht das RGBA-Bild dazwischen);
+/// dieser Roundtrip-Helfer lebt für die Tests weiter.
+#[cfg(test)]
 pub fn reencode_png(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     let img = decode_image(bytes)?;
     let (w, h) = (img.width(), img.height());
     Ok((encode_png(&img)?, w, h))
+}
+
+/// Längste Kante der ANZEIGE-Kopie (Pixel). Die Bühne rendert das Bild eh
+/// in Fensterbreite — mehr Auflösung bläht nur die base64-`data:`-URL im
+/// Event auf (verlustfreies PNG eines Foto-Scans kann zig MB erreichen).
+/// Clipboard und Ablage behalten IMMER die volle Auflösung.
+const DISPLAY_MAX_DIMENSION: u32 = 2000;
+
+/// Kodiert die Anzeige-Kopie fürs Frontend: bei Bedarf auf
+/// [`DISPLAY_MAX_DIMENSION`] herunterskaliert (Seitenverhältnis bleibt,
+/// normierte Boxen bleiben gültig), dann PNG.
+pub fn encode_display_png(img: &image::RgbaImage) -> Result<Vec<u8>, String> {
+    let (w, h) = (img.width(), img.height());
+    if w.max(h) <= DISPLAY_MAX_DIMENSION {
+        return encode_png(img);
+    }
+    let scaled = image::imageops::thumbnail(
+        img,
+        (w as u64 * DISPLAY_MAX_DIMENSION as u64 / w.max(h) as u64).max(1) as u32,
+        (h as u64 * DISPLAY_MAX_DIMENSION as u64 / w.max(h) as u64).max(1) as u32,
+    );
+    encode_png(&scaled)
 }
 
 /// Malt die Schwärz-Boxen als voll deckende schwarze Balken ins Bild
@@ -335,8 +368,30 @@ mod tests {
     #[test]
     fn decode_rejects_garbage_and_oversize() {
         assert!(decode_image(b"kein bild").is_err());
-        // Übergroßes Bild synthetisch: encode zulässig, decode-Guard greift
-        // erst über dem Limit — hier nur der Garbage-Pfad, das Limit selbst
-        // ist eine Konstante ohne eigenen Testwert (8000² wäre 256 MB RAM).
+        // Übergroße Kante wird am HEADER abgelehnt, bevor Pixel dekodiert
+        // werden (schmales 8001×10-Bild hält den Test-RAM klein).
+        let big = image::RgbaImage::from_pixel(
+            MAX_IMAGE_DIMENSION + 1,
+            10,
+            image::Rgba([255, 255, 255, 255]),
+        );
+        let png = encode_png(&big).unwrap();
+        let err = decode_image(&png).unwrap_err();
+        assert!(err.contains("zu groß"), "got: {err}");
+    }
+
+    #[test]
+    fn display_png_is_downscaled() {
+        // Anzeige-Kopie wird auf die Display-Kante gedeckelt; kleine Bilder
+        // bleiben unangetastet.
+        let small = image::RgbaImage::from_pixel(100, 50, image::Rgba([1, 2, 3, 255]));
+        let png = encode_display_png(&small).unwrap();
+        let (_, w, h) = reencode_png(&png).unwrap();
+        assert_eq!((w, h), (100, 50));
+
+        let wide = image::RgbaImage::from_pixel(4000, 1000, image::Rgba([1, 2, 3, 255]));
+        let png = encode_display_png(&wide).unwrap();
+        let (_, w, h) = reencode_png(&png).unwrap();
+        assert_eq!((w, h), (2000, 500), "längste Kante auf 2000, Verhältnis bleibt");
     }
 }

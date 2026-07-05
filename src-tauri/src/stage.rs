@@ -37,6 +37,13 @@ use crate::{secrets, storage};
 /// einfrieren. Reale PII-Texte sind selten >50 KB.
 const MAX_CLIPBOARD_BYTES: usize = 10 * 1024 * 1024;
 
+/// Eigener Cap für Bild-Rohbytes (64 MB). Der 10-MB-Text-Cap passt hier
+/// nicht: Windows liefert Clipboard-Bilder als UNKOMPRIMIERTES CF_DIB —
+/// ein normaler 4K-Screenshot sind ~33 MB, ein 1440p-Screenshot ~15 MB.
+/// Die eigentliche Arbeit begrenzt [`crate::imaging::MAX_IMAGE_DIMENSION`]
+/// (Pixel-Kanten), dieser Byte-Cap fängt nur Absurdes ab.
+const MAX_IMAGE_INPUT_BYTES: usize = 64 * 1024 * 1024;
+
 /// Poll-Intervall beim Warten auf das Ergebnis des synthetischen Copy.
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 
@@ -242,11 +249,18 @@ fn prepare_content(
     if let Some(t) = text_flavor {
         return Ok(StageContent::Plain(t));
     }
+    // Invariante aus Stufe 1: ein ÜBERGROSSER Text-Flavor endet IMMER im
+    // TooLarge-Fehler-State — ein Bild-Flavor daneben (Excel/Word legen
+    // Bitmap-Renderings dazu) darf ihn nicht still verdrängen, sonst wird
+    // der eigentlich kopierte Text durch ein geschwärztes PNG ersetzt.
+    if let Some(CaptureDecision::TooLarge(n)) = text_error {
+        return Err(CaptureDecision::TooLarge(n));
+    }
     if let Some(bytes) = image {
-        if !bytes.is_empty() && bytes.len() <= MAX_CLIPBOARD_BYTES {
+        if !bytes.is_empty() && bytes.len() <= MAX_IMAGE_INPUT_BYTES {
             return Ok(StageContent::Image(bytes));
         }
-        if bytes.len() > MAX_CLIPBOARD_BYTES {
+        if bytes.len() > MAX_IMAGE_INPUT_BYTES {
             return Err(CaptureDecision::TooLarge(bytes.len()));
         }
     }
@@ -590,9 +604,17 @@ pub fn capture(app: &AppHandle) {
     // übernommen, wenn das Clipboard noch DENSELBEN Text trägt wie beim
     // Capture — sonst hat ein Clipboard-Manager/Sync-Tool den Inhalt
     // zwischen Poll-Erfolg und Flavor-Read ersetzt, und wir würden fremden
-    // Inhalt schwärzen statt der Markierung des Users. Ohne Text-Capture
-    // (z. B. Screenshot) gibt es keinen Poll-Anker — dann wird direkt
-    // gelesen.
+    // Inhalt schwärzen statt der Markierung des Users.
+    //
+    // Ohne jeglichen Text-Flavor (None) gibt es keinen Poll-Anker. Dann
+    // wird NUR der Bild-Flavor gelesen — das ist die Bild-Entsprechung des
+    // dokumentierten Stufe-1-Fallbacks „erst kopieren, dann Hotkey"
+    // (Screenshot → Hotkey), und die Bühne ZEIGT das verarbeitete Bild,
+    // der User sieht also sofort, was geschwärzt wurde. Der HTML-Flavor
+    // wird hier bewusst NICHT gelesen: ein HTML-only-Clipboard ohne
+    // Text-Flavor ist kein realer Nutzer-Flow, sondern fast sicher ein
+    // veraltetes Fragment — das soll im Fehler-State enden statt still
+    // geschwärzt zu werden.
     let (html, image) = match &text_to_use {
         Some(t)
             if crate::clipboard::read_clipboard_text().as_deref() == Some(t.as_str()) =>
@@ -605,10 +627,7 @@ pub fn capture(app: &AppHandle) {
             );
             (None, None)
         }
-        None => (
-            crate::clipboard::read_clipboard_html(),
-            crate::clipboard::read_clipboard_image(),
-        ),
+        None => (None, crate::clipboard::read_clipboard_image()),
     };
     run_stage(app, text_to_use, html, image);
 }
@@ -803,18 +822,28 @@ fn run_stage(
 /// PNG in Clipboard + Ablage. Die Anzeige bekommt das ORIGINAL als data:-URL
 /// plus die Boxen — die Balken-Animation läuft im Frontend darüber.
 fn run_stage_image(app: &AppHandle, bytes: &[u8], settings: &Settings) {
-    // Dekodieren + Re-Encode: einheitliches PNG, EXIF/GPS/XMP sind weg.
-    let (display_png, _w, _h) = match crate::imaging::reencode_png(bytes) {
-        Ok(t) => t,
+    // Dekodieren (mit Dimensions-Guard VOR dem Pixel-Decode) + Re-Encode:
+    // einheitliches PNG, EXIF/GPS/XMP sind weg.
+    let img = match crate::imaging::decode_image(bytes) {
+        Ok(i) => i,
         Err(e) => {
             log::warn!("stage: Bild unbrauchbar ({e}) — Fehler-State");
             emit_error_state(app);
             return;
         }
     };
+    let full_png = match crate::imaging::encode_png(&img) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("stage: Re-Encode fehlgeschlagen ({e}) — Fehler-State");
+            emit_error_state(app);
+            return;
+        }
+    };
 
-    // Lokale OS-Texterkennung (Apple Vision / Windows.Media.Ocr).
-    let words = match crate::ocr::recognize(&display_png) {
+    // Lokale OS-Texterkennung (Apple Vision / Windows.Media.Ocr) — auf der
+    // VOLLEN Auflösung, die Genauigkeit soll nicht an der Anzeige hängen.
+    let words = match crate::ocr::recognize(&full_png) {
         Ok(w) => w,
         Err(e) => {
             log::warn!("stage: Texterkennung fehlgeschlagen ({e}) — Fehler-State");
@@ -833,12 +862,26 @@ fn run_stage_image(app: &AppHandle, bytes: &[u8], settings: &Settings) {
     // Bei ≥ 1 Finding: geschwärztes PNG rendern → Clipboard (Bild + Text)
     // und Ablage (PNG-Datei + Eintrag). Bei 0 Findings: nichts anfassen.
     let stash_id = if finding_count >= 1 {
-        stash_redacted_image(&display_png, &boxes, mode, &redacted, &findings, &job_id)
+        stash_redacted_image(img.clone(), &boxes, mode, &redacted, &findings, &job_id)
     } else {
         log::info!(
             "stage: keine personenbezogenen Daten im erkannten Text — Clipboard unverändert"
         );
         None
+    };
+
+    // Anzeige-Kopie GEDECKELT: für die Bühne reicht Bildschirm-Auflösung —
+    // ein verlustfreies Re-Encode eines großen Fotos kann sonst zig MB
+    // erreichen, und base64 (+33 %) davon würde IPC und Webview würgen.
+    // Die Boxen sind normiert und bleiben von der Skalierung unberührt;
+    // Clipboard/Ablage behalten die volle Auflösung.
+    let display_png = match crate::imaging::encode_display_png(&img) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("stage: Anzeige-Encode fehlgeschlagen ({e}) — Fehler-State");
+            emit_error_state(app);
+            return;
+        }
     };
 
     use base64::Engine as _;
@@ -864,25 +907,26 @@ fn run_stage_image(app: &AppHandle, bytes: &[u8], settings: &Settings) {
 /// Rendert die Balken ins Bild, schreibt das Ergebnis ins Clipboard
 /// (Bild + Text-Fallback) und legt es als PNG-Datei + Ablage-Eintrag ab.
 /// Fehlerpfade nur loggen — Clipboard und Ablage sind unabhängig nützlich.
+/// Fehler-Semantik richtet sich danach, ob das Clipboard schon beschrieben
+/// wurde: VOR dem Clipboard-Write (Encode-Fehler) → `None`, die Bühne sagt
+/// dann zu Recht „Clipboard unverändert". NACH dem Clipboard-Write
+/// (Stash-Pfad/-Write) → `Some(-1)`, gleiche Semantik wie `stash_insert`
+/// im Text-Flow — `stash_id: null` würde die Bühne sonst in den „Keine
+/// Daten gefunden — Clipboard unverändert"-Zustand schicken, der dann
+/// doppelt falsch wäre (PII gefunden UND Clipboard ersetzt).
 fn stash_redacted_image(
-    display_png: &[u8],
+    mut img: image::RgbaImage,
     boxes: &[crate::imaging::RedactionBox],
     mode: &str,
     redacted_text: &str,
     findings: &[Finding],
     job_id: &str,
 ) -> Option<i64> {
-    let mut img = match crate::imaging::decode_image(display_png) {
-        Ok(i) => i,
-        Err(e) => {
-            log::warn!("stage: Redaction-Decode fehlgeschlagen ({e})");
-            return None;
-        }
-    };
     crate::imaging::render_redactions(&mut img, boxes);
     let redacted_png = match crate::imaging::encode_png(&img) {
         Ok(p) => p,
         Err(e) => {
+            // Clipboard noch unangetastet — None ist hier die ehrliche Antwort.
             log::warn!("stage: Redaction-Encode fehlgeschlagen ({e})");
             return None;
         }
@@ -897,12 +941,12 @@ fn stash_redacted_image(
         Ok(p) => p,
         Err(e) => {
             log::warn!("stage: {e}");
-            return None;
+            return Some(-1);
         }
     };
     if let Err(e) = std::fs::write(&path, &redacted_png) {
         log::warn!("stage: stash-PNG nicht geschrieben ({e})");
-        return None;
+        return Some(-1);
     }
     let counts = aggregate_entity_counts(findings);
     let id = storage::stash_insert_image(
@@ -1508,8 +1552,15 @@ mod tests {
             prepare_content(Some("Text".into()), None, Some(vec![1, 2, 3])).unwrap();
         assert!(matches!(&content, StageContent::Plain(t) if t == "Text"));
 
-        // Übergroßes Bild → TooLarge statt Empty.
-        let big = vec![0u8; MAX_CLIPBOARD_BYTES + 1];
+        // Übergroßes Bild → TooLarge statt Empty. Der Bild-Cap ist eigener
+        // (64 MB) — unkomprimiertes CF_DIB normaler Screenshots liegt weit
+        // über dem 10-MB-Text-Cap.
+        let normal_screenshot_dib = vec![0u8; MAX_CLIPBOARD_BYTES + 1]; // ~10 MB
+        assert!(matches!(
+            prepare_content(None, None, Some(normal_screenshot_dib)),
+            Ok(StageContent::Image(_))
+        ));
+        let big = vec![0u8; MAX_IMAGE_INPUT_BYTES + 1];
         assert!(matches!(
             prepare_content(None, None, Some(big)),
             Err(CaptureDecision::TooLarge(_))
@@ -1517,6 +1568,18 @@ mod tests {
 
         // Leeres Bild-Array zählt nicht als Inhalt.
         assert!(prepare_content(None, None, Some(Vec::new())).is_err());
+    }
+
+    #[test]
+    fn prepare_oversized_text_beats_image() {
+        // Invariante aus Stufe 1: übergroßer Text-Flavor endet IMMER im
+        // TooLarge-State — das Bitmap-Rendering daneben (Excel/Word) darf
+        // den kopierten Text nicht still durch ein PNG ersetzen.
+        let big_text = "x".repeat(MAX_CLIPBOARD_BYTES + 1);
+        assert!(matches!(
+            prepare_content(Some(big_text), None, Some(vec![1, 2, 3])),
+            Err(CaptureDecision::TooLarge(_))
+        ));
     }
 
     // ----------------------------------------------------- Anzeige-Caps (Stufe 2)

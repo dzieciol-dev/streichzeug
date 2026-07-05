@@ -209,11 +209,50 @@ mod winocr {
             .map_err(|e| e.to_string())?
             .get()
             .map_err(|e| format!("BitmapDecoder (Format nicht unterstützt?): {e}"))?;
-        let bitmap = decoder
-            .GetSoftwareBitmapAsync()
-            .map_err(|e| e.to_string())?
-            .get()
-            .map_err(|e| e.to_string())?;
+
+        // Windows.Media.Ocr verweigert Bilder über MaxImageDimension
+        // (~2600 px) — 4K-Screenshots und 300-dpi-A4-Scans liegen darüber.
+        // Dann proportional herunterskalieren: die Wort-Rects kommen in
+        // Pixeln der SKALIERTEN Bitmap und werden unten durch deren Maße
+        // normiert — die normierten Boxen bleiben korrekt.
+        // MaxImageDimension ist eine statische WinRT-Property.
+        let engine_max = OcrEngine::MaxImageDimension().map_err(|e| e.to_string())?;
+        let src_w = decoder.OrientedPixelWidth().map_err(|e| e.to_string())?;
+        let src_h = decoder.OrientedPixelHeight().map_err(|e| e.to_string())?;
+        let bitmap = if engine_max > 0 && src_w.max(src_h) > engine_max {
+            use windows::Graphics::Imaging::{
+                BitmapAlphaMode, BitmapInterpolationMode, BitmapPixelFormat, BitmapTransform,
+                ColorManagementMode, ExifOrientationMode,
+            };
+            let scale = engine_max as f64 / src_w.max(src_h) as f64;
+            let transform = BitmapTransform::new().map_err(|e| e.to_string())?;
+            transform
+                .SetScaledWidth(((src_w as f64 * scale) as u32).max(1))
+                .map_err(|e| e.to_string())?;
+            transform
+                .SetScaledHeight(((src_h as f64 * scale) as u32).max(1))
+                .map_err(|e| e.to_string())?;
+            transform
+                .SetInterpolationMode(BitmapInterpolationMode::Fant)
+                .map_err(|e| e.to_string())?;
+            decoder
+                .GetSoftwareBitmapTransformedAsync(
+                    BitmapPixelFormat::Bgra8,
+                    BitmapAlphaMode::Premultiplied,
+                    &transform,
+                    ExifOrientationMode::RespectExifOrientation,
+                    ColorManagementMode::DoNotColorManage,
+                )
+                .map_err(|e| e.to_string())?
+                .get()
+                .map_err(|e| format!("Bitmap-Downscale: {e}"))?
+        } else {
+            decoder
+                .GetSoftwareBitmapAsync()
+                .map_err(|e| e.to_string())?
+                .get()
+                .map_err(|e| e.to_string())?
+        };
 
         let width = bitmap.PixelWidth().map_err(|e| e.to_string())? as f64;
         let height = bitmap.PixelHeight().map_err(|e| e.to_string())? as f64;

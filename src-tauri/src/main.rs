@@ -29,8 +29,10 @@ mod hotkey; // Smart-Paste-Handler (primäre UX)
 mod ner; // Layer-3 NER (optional, feature = "ner")
 mod secrets; // HMAC-Master-Secret-Verwaltung
 mod settings; // User-Settings (Hotkey, Auto-Detection-Toggle)
+mod stage; // Schwärz-Bühne: Capture-Flow des sichtbaren zweiten Workflows
 mod storage; // SQLite-basierter Mapping-Store
-mod tokens; // Token-Generierung «T_<hash>»
+mod tokens;
+mod widget; // Schwebendes Mini-Widget (nicht-aktivierender Klick-Einstieg) // Token-Generierung «T_<hash>»
 
 use clipboard::{ClipboardWatcher, PlatformWatcher};
 use detection::Finding;
@@ -39,7 +41,7 @@ use std::sync::Arc;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WindowEvent};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tauri_plugin_notification::NotificationExt;
 
 // =================================================================== Tauri-Commands
@@ -183,6 +185,133 @@ fn clear_all_mappings() -> usize {
     storage::purge_all()
 }
 
+// ------------------------------------------------------------ Ablage (Schwärz-Bühne)
+//
+// Commands der Ablage. Die Bühne selbst schreibt Einträge über
+// `storage::stash_insert`; das Frontend liest/kopiert/löscht über diese
+// Commands. Alle geben nur die geschwärzte Fassung heraus — nie Originaltext.
+
+/// Frontend-Command: alle Ablage-Einträge (neueste zuerst), ohne Volltext.
+#[tauri::command]
+fn stash_list() -> Vec<storage::StashMeta> {
+    storage::stash_list()
+}
+
+/// Frontend-Command: geschwärzter Volltext eines Eintrags.
+#[tauri::command]
+fn stash_get_text(id: i64) -> Result<String, String> {
+    storage::stash_get_text(id)
+}
+
+/// Frontend-Command: „Nochmal kopieren" — Volltext ins System-Clipboard.
+#[tauri::command]
+fn stash_copy(id: i64) -> Result<(), String> {
+    storage::stash_copy(id)
+}
+
+/// Frontend-Command: einzelnen Eintrag löschen.
+#[tauri::command]
+fn stash_delete(id: i64) -> Result<(), String> {
+    storage::stash_delete(id)
+}
+
+/// Frontend-Command: Ablage leeren, liefert Anzahl gelöschter Einträge.
+#[tauri::command]
+fn stash_clear() -> usize {
+    storage::stash_clear()
+}
+
+/// Frontend-Command: Bühne mit dem aktuellen Clipboard-Inhalt starten —
+/// klickbarer Einstieg über den Button im Fenster (Dock-Klick → Button),
+/// für alle, die weder Hotkey noch Tray nutzen wollen/können.
+#[tauri::command]
+fn stage_clipboard(app: tauri::AppHandle) {
+    stage::capture_from_clipboard(&app);
+}
+
+/// Frontend-Command: Bühne mit per Drag & Drop hereingezogenem Text starten.
+/// Der Text kommt aus dem HTML5-Drop-Event — die Markierung wandert damit
+/// OHNE Clipboard und ohne synthetische Tastendrücke in die App.
+#[tauri::command]
+fn stage_text(app: tauri::AppHandle, text: String) {
+    stage::capture_from_text(&app, text);
+}
+
+/// Widget-Command: voller Capture-Flow inklusive synthetischem Strg+C.
+///
+/// MUSS auf dem Main-Thread laufen: enigo nutzt auf macOS die Text-Services-
+/// APIs (`TSMGetInputSourceProperty`), die per `dispatch_assert_queue` die
+/// Main-Queue erzwingen — von einem Tokio-Worker aus crasht das mit SIGTRAP
+/// (Crash-Report 2026-07-05, macOS 26). Deshalb kein `async`, sondern
+/// explizites Einreihen auf den Main-Thread — derselbe Ausführungskontext
+/// wie der Global-Shortcut-Handler, der seit der Beta stabil läuft. Das
+/// Polling blockiert den Main-Thread dabei kurz (wie beim Hotkey-Pfad).
+#[tauri::command]
+fn stage_capture(app: tauri::AppHandle) {
+    let handle = app.clone();
+    if let Err(e) = app.run_on_main_thread(move || stage::capture(&handle)) {
+        log::warn!("stage_capture: run_on_main_thread failed: {e}");
+    }
+}
+
+/// Frontend-Command: Widget ein-/ausblenden und die Wahl persistieren.
+/// Wirkt sofort (kein Restart) — das Fenster existiert versteckt weiter.
+#[tauri::command]
+fn set_widget_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    widget::set_visible(&app, visible)?;
+    let mut s = Settings::load();
+    s.show_widget = visible;
+    s.save().map_err(|e| e.to_string())
+}
+
+/// Widget-Command: natives Kontextmenü am Widget zeigen (Rechtsklick).
+/// Menü-Aufbau + Popup müssen auf dem Main-Thread laufen; die Auswahl landet
+/// im globalen `on_menu_event`-Handler (IDs `widget_*`, siehe `setup()`).
+#[tauri::command]
+fn widget_menu(app: tauri::AppHandle) {
+    use tauri::menu::{ContextMenu, MenuBuilder, MenuItem};
+    let handle = app.clone();
+    let result = app.run_on_main_thread(move || {
+        let Some(window) = handle.get_webview_window(widget::WIDGET_LABEL) else {
+            return;
+        };
+        let open_item = MenuItem::with_id(
+            &handle,
+            "widget_open_app",
+            "Streichzeug öffnen",
+            true,
+            None::<&str>,
+        );
+        let hide_item = MenuItem::with_id(
+            &handle,
+            "widget_hide",
+            "Widget ausblenden",
+            true,
+            None::<&str>,
+        );
+        let (Ok(open_item), Ok(hide_item)) = (open_item, hide_item) else {
+            log::warn!("widget_menu: Menü-Items nicht erstellbar");
+            return;
+        };
+        let menu = MenuBuilder::new(&handle)
+            .item(&open_item)
+            .separator()
+            .item(&hide_item)
+            .build();
+        match menu {
+            Ok(menu) => {
+                if let Err(e) = menu.popup(window.as_ref().window()) {
+                    log::warn!("widget_menu: popup failed: {e}");
+                }
+            }
+            Err(e) => log::warn!("widget_menu: build failed: {e}"),
+        }
+    });
+    if let Err(e) = result {
+        log::warn!("widget_menu: run_on_main_thread failed: {e}");
+    }
+}
+
 /// Zeigt die einmalige Warnung, dass das Master-Secret nicht persistiert
 /// werden konnte und diese Sitzung ein temporäres (ephemeres) Secret nutzt —
 /// bestehende Tokens sind dann nicht mehr rückübersetzbar. Fehler-Kanal,
@@ -274,14 +403,35 @@ fn main() {
         });
     }
 
+    // Capture-Hotkey der Schwärz-Bühne für die Handler-Weiche vorparsen.
+    // Bei leerem String / Kollision mit dem Smart-Paste-Hotkey / nicht
+    // parsebarem Accelerator bleibt die Weiche `None` — der Handler routet dann
+    // ausschließlich zum bestehenden Smart-Paste-Pfad, der so nie brechen kann.
+    // Die eigentliche Registrierung (inkl. Logging der drei Fälle) macht
+    // `stage::register_stage_hotkey` weiter unten in `setup()`.
+    let stage_shortcut: Option<Shortcut> = {
+        let s = &cfg.stage_hotkey;
+        if s.is_empty() || s == &cfg.hotkey {
+            None
+        } else {
+            s.parse::<Shortcut>().ok()
+        }
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        hotkey::handle(app);
+                .with_handler(move |app, shortcut, event| {
+                    if event.state() != ShortcutState::Pressed {
+                        return;
+                    }
+                    // Weiche: der Capture-Hotkey öffnet die Bühne, jeder andere
+                    // (also der Smart-Paste-Hotkey) läuft in den bestehenden Pfad.
+                    match &stage_shortcut {
+                        Some(sc) if shortcut == sc => stage::capture(app),
+                        _ => hotkey::handle(app),
                     }
                 })
                 .build(),
@@ -300,6 +450,16 @@ fn main() {
             get_storage_status,
             clear_all_mappings,
             finalize_secret_setup,
+            stash_list,
+            stash_get_text,
+            stash_copy,
+            stash_delete,
+            stash_clear,
+            stage_clipboard,
+            stage_text,
+            stage_capture,
+            set_widget_visible,
+            widget_menu,
         ])
         .setup(move |app| {
             // ----------------------------------- Master-Secret prüfen
@@ -367,6 +527,17 @@ fn main() {
             )?;
             let show_item =
                 MenuItem::with_id(app, "show", "Fenster anzeigen", true, None::<&str>)?;
+            // Klickbarer Bühnen-Einstieg ohne Hotkey: schwärzt den aktuellen
+            // Clipboard-Inhalt (KEIN synthetisches Strg+C — der Menü-Klick
+            // hat der Quell-App bereits den Fokus genommen, die Markierung
+            // wäre nicht mehr abholbar). Flow: Text kopieren → Tray → Klick.
+            let stage_item = MenuItem::with_id(
+                app,
+                "stage_clipboard",
+                "Zwischenablage schwärzen",
+                true,
+                None::<&str>,
+            )?;
             let log_item =
                 MenuItem::with_id(app, "open_log", "Log-Ordner öffnen", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
@@ -375,7 +546,17 @@ fn main() {
             let sep3 = PredefinedMenuItem::separator(app)?;
             let menu = Menu::with_items(
                 app,
-                &[&auto_item, &ner_item, &sep1, &show_item, &log_item, &sep2, &sep3, &quit_item],
+                &[
+                    &auto_item,
+                    &ner_item,
+                    &sep1,
+                    &stage_item,
+                    &show_item,
+                    &log_item,
+                    &sep2,
+                    &sep3,
+                    &quit_item,
+                ],
             )?;
 
             // Tray-Icon: auf macOS ein monochromes Template (P-Silhouette
@@ -413,6 +594,7 @@ fn main() {
                             let _ = w.set_focus();
                         }
                     }
+                    "stage_clipboard" => stage::capture_from_clipboard(app),
                     "open_log" => open_log_folder_impl(),
                     "quit" => app.exit(0),
                     "toggle_auto" => {
@@ -525,6 +707,43 @@ fn main() {
                 ),
             }
 
+            // ----------------------------------- Capture-Hotkey (Schwärz-Bühne)
+            // Zweiter, paralleler Hotkey. Robustheit liegt komplett in
+            // `register_stage_hotkey`: leer → aus, == Smart-Paste-Hotkey → aus,
+            // nicht registrierbar → aus. In allen drei Fällen bleibt der oben
+            // registrierte Smart-Paste-Hotkey unberührt, die App startet normal.
+            stage::register_stage_hotkey(app.handle(), &cfg.stage_hotkey, &cfg.hotkey);
+
+            // ----------------------------------- Schwebendes Widget (macOS)
+            // Nicht-aktivierender Klick-Einstieg in die Bühne. Fehler werden
+            // in widget::init nur geloggt — Komfort-Feature, darf den Start
+            // nicht verhindern.
+            widget::init(app.handle(), &cfg);
+
+            // Auswahl aus dem Widget-Kontextmenü (Rechtsklick, siehe Command
+            // `widget_menu`). Läuft über den App-weiten Menü-Handler — die
+            // Tray-Menü-IDs sind disjunkt, es kann nichts doppelt feuern.
+            app.on_menu_event(|app, event| match event.id().as_ref() {
+                "widget_hide" => {
+                    if let Err(e) = widget::set_visible(app, false) {
+                        log::warn!("widget_hide: {e}");
+                    }
+                    let mut s = Settings::load();
+                    s.show_widget = false;
+                    if let Err(e) = s.save() {
+                        log::warn!("widget_hide: Setting nicht gespeichert: {e}");
+                    }
+                }
+                "widget_open_app" => {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.show();
+                        let _ = w.unminimize();
+                        let _ = w.set_focus();
+                    }
+                }
+                _ => {}
+            });
+
             // ----------------------------------- Optional: Auto-Detection-Watcher
             if cfg.auto_detection {
                 spawn_watcher(app);
@@ -537,6 +756,20 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
+            // Session-only-Ablage: beim App-Beenden die Schwärz-Bühnen-Ablage
+            // leeren, falls der User das gewählt hat. Bewusst hier am
+            // RunEvent::Exit (nicht beim Fenster-Schließen), damit „Fenster zu,
+            // App bleibt im Tray" die Ablage nicht überraschend löscht.
+            if let tauri::RunEvent::Exit = event {
+                if Settings::load().stash_clear_on_quit {
+                    let n = storage::stash_clear();
+                    log::info!("stash: cleared {n} entries on quit (stash_clear_on_quit)");
+                }
+                // Widget-Position gesammelt persistieren (nicht pro
+                // Moved-Event — ein Drag feuert Dutzende davon).
+                widget::persist_position();
+            }
+
             // Dock-Klick (bzw. erneutes Öffnen via Finder/Launchpad/`open -a`)
             // bei verstecktem Fenster holt es zurück nach vorn. macOS liefert
             // hierfür kein WindowEvent, sondern das RunEvent::Reopen — ohne

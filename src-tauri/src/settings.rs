@@ -101,10 +101,51 @@ pub struct Settings {
     /// dieses Feld manuell auf `false` setzen.
     #[serde(default)]
     pub onboarded: bool,
+
+    /// Ablage-Einträge der Schwärz-Bühne beim App-Quit löschen
+    /// (Session-only-Ablage). Default off — die Ablage überlebt Neustarts,
+    /// bis der User manuell löscht.
+    #[serde(default)]
+    pub stash_clear_on_quit: bool,
+
+    /// Hotkey für „Markierung schwärzen & ablegen" (Capture → Bühne).
+    /// Default: `CmdOrCtrl+Alt+Shift+B`. **Leerer String = Feature aus** —
+    /// dann wird kein zweiter Shortcut registriert und der Smart-Paste-Hotkey
+    /// bleibt der einzige. Bewusst separat vom Smart-Paste-Hotkey (`hotkey`),
+    /// weil die Bühne ein paralleler, sichtbarer Workflow ist.
+    #[serde(default = "default_stage_hotkey")]
+    pub stage_hotkey: String,
+
+    /// Animations-Stil der Schwärz-Bühne:
+    /// `"slow"` | `"normal"` | `"fast"` | `"off"`.
+    /// Das Backend interpretiert den Wert **nicht** — es reicht ihn nur ans
+    /// Frontend durch, das die Marker-Animation entsprechend abspielt.
+    /// (Der frühere Wert `"full"` wird vom Frontend als `"normal"` behandelt.)
+    #[serde(default = "default_stage_animation")]
+    pub stage_animation: String,
+
+    /// Schwebendes Mini-Widget anzeigen (nicht-aktivierender Klick-Einstieg
+    /// in die Bühne, aktuell nur macOS). Default off — ein permanent
+    /// schwebendes Fensterchen muss eine bewusste Entscheidung sein.
+    #[serde(default)]
+    pub show_widget: bool,
+
+    /// Zuletzt gemerkte Widget-Position (logische Pixel, Ursprung oben
+    /// links). `None` = noch nie bewegt, OS platziert das Fenster.
+    #[serde(default)]
+    pub widget_position: Option<(f64, f64)>,
 }
 
 fn default_retention_minutes() -> u32 {
     60
+}
+
+fn default_stage_hotkey() -> String {
+    "CmdOrCtrl+Alt+Shift+B".into()
+}
+
+fn default_stage_animation() -> String {
+    "normal".into()
 }
 
 impl Default for Settings {
@@ -124,6 +165,11 @@ impl Default for Settings {
             retention_minutes: 60,
             strict_mode: false,
             onboarded: false,
+            stash_clear_on_quit: false,
+            stage_hotkey: default_stage_hotkey(),
+            stage_animation: default_stage_animation(),
+            show_widget: false,
+            widget_position: None,
         }
     }
 }
@@ -194,9 +240,32 @@ mod tests {
         assert_eq!(s.hotkey, "CmdOrCtrl+Alt+B");
         assert!(!s.auto_detection, "auto_detection must be off by default");
         assert!(!s.enable_ner, "enable_ner must be off by default");
-        assert!(!s.enable_notifications, "notifications must be off by default (focus-steal)");
+        assert!(
+            !s.enable_notifications,
+            "notifications must be off by default (focus-steal)"
+        );
         assert_eq!(s.retention_minutes, 60, "1h Retention als Default");
-        assert!(!s.strict_mode, "strict_mode off als Default (reversibel ist häufiger gewünscht)");
+        assert!(
+            !s.strict_mode,
+            "strict_mode off als Default (reversibel ist häufiger gewünscht)"
+        );
+        assert!(
+            !s.stash_clear_on_quit,
+            "stash_clear_on_quit off als Default (Ablage überlebt Neustart)"
+        );
+        assert_eq!(
+            s.stage_hotkey, "CmdOrCtrl+Alt+Shift+B",
+            "Capture-Hotkey-Default aus Vertrag 2.1"
+        );
+        assert_eq!(
+            s.stage_animation, "normal",
+            "Animations-Stil-Default aus Vertrag 2.1"
+        );
+        assert!(!s.show_widget, "Widget off als Default (bewusstes Opt-in)");
+        assert!(
+            s.widget_position.is_none(),
+            "keine Widget-Position bis zum ersten Move"
+        );
     }
 
     #[test]
@@ -209,6 +278,11 @@ mod tests {
             retention_minutes: 15,
             strict_mode: true,
             onboarded: true,
+            stash_clear_on_quit: true,
+            show_widget: true,
+            widget_position: Some((120.0, 240.0)),
+            stage_hotkey: "CmdOrCtrl+Alt+G".into(),
+            stage_animation: "fast".into(),
         };
         let json = serde_json::to_string(&s).unwrap();
         let s2: Settings = serde_json::from_str(&json).unwrap();
@@ -218,6 +292,11 @@ mod tests {
         assert_eq!(s.enable_notifications, s2.enable_notifications);
         assert_eq!(s.retention_minutes, s2.retention_minutes);
         assert_eq!(s.strict_mode, s2.strict_mode);
+        assert_eq!(s.stash_clear_on_quit, s2.stash_clear_on_quit);
+        assert_eq!(s.stage_hotkey, s2.stage_hotkey);
+        assert_eq!(s.stage_animation, s2.stage_animation);
+        assert_eq!(s.show_widget, s2.show_widget);
+        assert_eq!(s.widget_position, s2.widget_position);
     }
 
     #[test]
@@ -227,5 +306,17 @@ mod tests {
         let legacy_json = r#"{"hotkey":"CmdOrCtrl+B","auto_detection":false}"#;
         let s: Settings = serde_json::from_str(legacy_json).unwrap();
         assert!(!s.enable_ner);
+    }
+
+    #[test]
+    fn missing_stage_fields_load_as_defaults() {
+        // Forward-Compat: eine settings.json aus der Zeit vor der
+        // Schwärz-Bühne kennt `stage_hotkey`/`stage_animation` nicht. Die
+        // `#[serde(default = …)]`-Attribute müssen die Vertragswerte liefern,
+        // sonst bricht das Laden bestehender Installationen.
+        let legacy_json = r#"{"hotkey":"CmdOrCtrl+Alt+B","auto_detection":false}"#;
+        let s: Settings = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(s.stage_hotkey, "CmdOrCtrl+Alt+Shift+B");
+        assert_eq!(s.stage_animation, "normal");
     }
 }

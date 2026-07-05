@@ -45,6 +45,7 @@
 
 use once_cell::sync::Lazy;
 use rusqlite::{params, params_from_iter, Connection};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -100,8 +101,10 @@ fn open_encrypted(path: &Path, key_hex: &str) -> rusqlite::Result<Connection> {
 /// Prüft, ob die Verbindung tatsächlich lesbar ist (korrekter Key bzw.
 /// Klartext-DB). Bei falschem Key liefert SQLCipher „file is not a database".
 fn is_readable(conn: &Connection) -> bool {
-    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0))
-        .is_ok()
+    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .is_ok()
 }
 
 /// Migriert eine bestehende **unverschlüsselte** `storage.db` transparent nach
@@ -216,6 +219,20 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (case_id, token)
         );
         CREATE INDEX IF NOT EXISTS idx_mappings_token ON mappings(token);
+
+        -- Ablage der Schwärz-Bühne. Bewusst **nur geschwärzter Text** — kein
+        -- Original, damit die Ablage strict-mode-kompatibel ist und keinem
+        -- eigenen Retention-Zwang unterliegt (die Rück-Übersetzbarkeit hängt
+        -- allein an `mappings`). Löschung: manuell, `stash_clear`, optional
+        -- bei Quit (`stash_clear_on_quit`).
+        CREATE TABLE IF NOT EXISTS stash (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+            mode          TEXT NOT NULL,
+            title         TEXT NOT NULL,
+            redacted_text TEXT NOT NULL,
+            entity_counts TEXT NOT NULL
+        );
         "#,
     )?;
     Ok(())
@@ -330,8 +347,9 @@ pub fn restore_all_cases(text: &str) -> String {
 /// in Reihenfolge des ersten Auftretens. Nutzt das zentrale Token-Regex aus
 /// [`crate::tokens`], damit Format-Änderungen an einer Stelle bleiben.
 fn extract_tokens(text: &str) -> Vec<&str> {
-    static RE: Lazy<regex::Regex> =
-        Lazy::new(|| regex::Regex::new(crate::tokens::TOKEN_REGEX_PATTERN).expect("valid token regex"));
+    static RE: Lazy<regex::Regex> = Lazy::new(|| {
+        regex::Regex::new(crate::tokens::TOKEN_REGEX_PATTERN).expect("valid token regex")
+    });
     let mut seen = std::collections::HashSet::new();
     RE.find_iter(text)
         .map(|m| m.as_str())
@@ -391,9 +409,11 @@ pub fn purge_all() -> usize {
 /// im Datenspeicherungs-Bereich.
 pub fn mapping_count() -> usize {
     let conn = CONN.lock().expect("CONN mutex poisoned");
-    conn.query_row("SELECT COUNT(*) FROM mappings", [], |row| row.get::<_, i64>(0))
-        .map(|n| n as usize)
-        .unwrap_or(0)
+    conn.query_row("SELECT COUNT(*) FROM mappings", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|n| n as usize)
+    .unwrap_or(0)
 }
 
 /// Löscht alle Mappings eines Case — z. B. wenn der User „Case schließen"
@@ -402,6 +422,154 @@ pub fn mapping_count() -> usize {
 pub fn clear(case_id: &str) {
     let conn = CONN.lock().expect("CONN mutex poisoned");
     let _ = conn.execute("DELETE FROM mappings WHERE case_id = ?1", params![case_id]);
+}
+
+// ============================================================= Ablage (Stash)
+//
+// Die Schwärz-Bühne legt jedes geschwärzte Ergebnis als Ablage-Eintrag ab.
+// Bewusst getrennt vom Mapping-Store: die Ablage speichert nur die geschwärzte
+// Fassung und darf länger leben als die (retention-gebundene) Mapping-Tabelle.
+
+/// Listen-Metadaten eines Ablage-Eintrags. Wird direkt ans Frontend
+/// serialisiert (Command `stash_list`) — der geschwärzte Volltext bleibt
+/// draußen und wird nur auf Anforderung über `stash_get_text` nachgeladen.
+#[derive(Debug, Clone, Serialize)]
+pub struct StashMeta {
+    pub id: i64,
+    /// ISO-8601 in UTC (`2026-07-04T12:34:56Z`). SQLite speichert
+    /// `CURRENT_TIMESTAMP` bereits als UTC — wir formatieren nur um.
+    pub created_at: String,
+    pub mode: String,
+    pub title: String,
+    pub entity_counts: HashMap<String, u32>,
+    /// Zeichen-Länge (nicht Bytes) des geschwärzten Volltexts — für eine
+    /// aussagekräftige Größenanzeige unabhängig von Umlauten/Emoji.
+    pub char_len: usize,
+}
+
+/// Kürzt einen Text auf einen kompakten Listen-Titel: Whitespace-Läufe zu
+/// je einem Space kollabiert, dann die ersten 60 **Zeichen**. Der Schnitt
+/// läuft über `chars()` statt Byte-Offsets, damit Umlaute/Emoji nie an einer
+/// UTF-8-Grenze zerhackt werden. Der Aufrufer reicht den Titel un-vorbereitet
+/// (in der Praxis den geschwärzten Text selbst) — die Normalisierung lebt
+/// hier an einer Stelle.
+fn stash_title(raw: &str) -> String {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.chars().take(60).collect()
+}
+
+/// Legt einen Ablage-Eintrag an und liefert dessen `rowid`. `entity_counts`
+/// wird als JSON-Objekt (`{"person":2,"iban":1}`) serialisiert, damit die
+/// Chip-Anzeige im Frontend die Typen ohne Zusatztabelle rekonstruiert.
+///
+/// `#[allow(dead_code)]`: der einzige Nicht-Test-Aufrufer ist der Capture-Flow
+/// aus WP-A; bis dessen Merge hat die Funktion in diesem Crate keinen Caller.
+#[allow(dead_code)]
+pub fn stash_insert(
+    mode: &str,
+    title: &str,
+    redacted_text: &str,
+    entity_counts: &HashMap<String, u32>,
+) -> i64 {
+    let title = stash_title(title);
+    let counts_json = serde_json::to_string(entity_counts).unwrap_or_else(|_| "{}".to_string());
+    let conn = CONN.lock().expect("CONN mutex poisoned");
+    match conn.execute(
+        "INSERT INTO stash (mode, title, redacted_text, entity_counts) VALUES (?1, ?2, ?3, ?4)",
+        params![mode, title, redacted_text, counts_json],
+    ) {
+        Ok(_) => conn.last_insert_rowid(),
+        Err(e) => {
+            log::warn!("storage: stash_insert failed: {e}");
+            -1
+        }
+    }
+}
+
+/// Alle Ablage-Einträge, neueste zuerst. Der Volltext wird bewusst nicht
+/// mitgeladen — nur seine Zeichen-Länge (`length()` zählt bei TEXT Zeichen,
+/// nicht Bytes), damit die Liste auch bei großen Einträgen schlank bleibt.
+pub fn stash_list() -> Vec<StashMeta> {
+    let conn = CONN.lock().expect("CONN mutex poisoned");
+    let mut stmt = match conn.prepare(
+        "SELECT id, strftime('%Y-%m-%dT%H:%M:%SZ', created_at), mode, title, entity_counts, length(redacted_text) \
+         FROM stash ORDER BY id DESC",
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            log::warn!("storage: stash_list prepare failed: {e}");
+            return Vec::new();
+        }
+    };
+    let rows = stmt.query_map([], |row| {
+        let counts_json: String = row.get(4)?;
+        let entity_counts: HashMap<String, u32> =
+            serde_json::from_str(&counts_json).unwrap_or_default();
+        Ok(StashMeta {
+            id: row.get(0)?,
+            created_at: row.get(1)?,
+            mode: row.get(2)?,
+            title: row.get(3)?,
+            entity_counts,
+            char_len: row.get::<_, i64>(5)? as usize,
+        })
+    });
+    match rows {
+        Ok(iter) => iter.flatten().collect(),
+        Err(e) => {
+            log::warn!("storage: stash_list query failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Liefert den geschwärzten Volltext eines Eintrags. `Err`, wenn die ID
+/// nicht (mehr) existiert.
+pub fn stash_get_text(id: i64) -> Result<String, String> {
+    let conn = CONN.lock().expect("CONN mutex poisoned");
+    conn.query_row(
+        "SELECT redacted_text FROM stash WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, String>(0),
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => format!("Ablage-Eintrag {id} nicht gefunden"),
+        other => other.to_string(),
+    })
+}
+
+/// Schreibt den geschwärzten Volltext eines Eintrags ins System-Clipboard —
+/// „Nochmal kopieren" aus der Ablage.
+pub fn stash_copy(id: i64) -> Result<(), String> {
+    let text = stash_get_text(id)?;
+    crate::clipboard::write_clipboard_text(&text)
+}
+
+/// Löscht einen einzelnen Eintrag. Idempotent: eine bereits fehlende ID ist
+/// kein Fehler.
+pub fn stash_delete(id: i64) -> Result<(), String> {
+    let conn = CONN.lock().expect("CONN mutex poisoned");
+    conn.execute("DELETE FROM stash WHERE id = ?1", params![id])
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Leert die gesamte Ablage und liefert die Anzahl gelöschter Einträge.
+/// Vom „Alle löschen"-Button und optional beim App-Quit gerufen.
+pub fn stash_clear() -> usize {
+    let conn = CONN.lock().expect("CONN mutex poisoned");
+    match conn.execute("DELETE FROM stash", []) {
+        Ok(n) => {
+            if n > 0 {
+                log::info!("storage: cleared {n} stash entries");
+            }
+            n
+        }
+        Err(e) => {
+            log::warn!("storage: stash_clear failed: {e}");
+            0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -417,7 +585,10 @@ mod tests {
 
         let pseud = "Hallo «P_a4b», erreichbar unter «E_zk9».";
         let restored = restore(case, pseud);
-        assert_eq!(restored, "Hallo Max Mustermann, erreichbar unter jan@example.de.");
+        assert_eq!(
+            restored,
+            "Hallo Max Mustermann, erreichbar unter jan@example.de."
+        );
     }
 
     #[test]
@@ -445,7 +616,7 @@ mod tests {
         clear(case);
         record(case, "«P_x»", "Alice");
         record(case, "«P_x»", "Alice"); // selber Eintrag
-        // Sollte nicht crashen, und der Restore funktioniert weiterhin.
+                                        // Sollte nicht crashen, und der Restore funktioniert weiterhin.
         assert_eq!(restore(case, "«P_x»"), "Alice");
     }
 
@@ -561,5 +732,133 @@ mod tests {
         // Darf nicht crashen und legt nichts an.
         migrate_plaintext_if_needed(&path, "aa").unwrap();
         assert!(!path.exists());
+    }
+
+    // ------------------------------------------------------- Ablage (Stash, WP-B)
+    //
+    // Alle Stash-Tests teilen sich die eine In-Memory-`stash`-Tabelle des
+    // Test-Prozesses (CONN). Da es keinen Partitions-Schlüssel wie `case_id`
+    // gibt, serialisiert dieser Lock die Stash-Tests gegeneinander; jeder
+    // Test startet mit `stash_clear()` von sauberem Grund.
+    static STASH_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn stash_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        let g = STASH_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        stash_clear();
+        g
+    }
+
+    fn counts(pairs: &[(&str, u32)]) -> HashMap<String, u32> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn stash_insert_list_get_delete_roundtrip() {
+        let _guard = stash_test_guard();
+
+        let id = stash_insert(
+            "reversible",
+            "Sehr geehrter «P_a4b»",
+            "Sehr geehrter «P_a4b», Ihre IBAN «I_x9y».",
+            &counts(&[("person", 1), ("iban", 1)]),
+        );
+        assert!(id > 0);
+
+        let list = stash_list();
+        assert_eq!(list.len(), 1);
+        let meta = &list[0];
+        assert_eq!(meta.id, id);
+        assert_eq!(meta.mode, "reversible");
+        assert_eq!(meta.title, "Sehr geehrter «P_a4b»");
+        assert_eq!(
+            meta.char_len,
+            "Sehr geehrter «P_a4b», Ihre IBAN «I_x9y».".chars().count()
+        );
+        // created_at ist ISO-8601-UTC (…Z).
+        assert!(meta.created_at.ends_with('Z') && meta.created_at.contains('T'));
+
+        let text = stash_get_text(id).unwrap();
+        assert_eq!(text, "Sehr geehrter «P_a4b», Ihre IBAN «I_x9y».");
+
+        stash_delete(id).unwrap();
+        assert!(stash_list().is_empty());
+        assert!(
+            stash_get_text(id).is_err(),
+            "gelöschter Eintrag darf nicht mehr lesbar sein"
+        );
+    }
+
+    #[test]
+    fn stash_list_newest_first() {
+        let _guard = stash_test_guard();
+        let first = stash_insert("strict", "erster", "erster", &HashMap::new());
+        let second = stash_insert("strict", "zweiter", "zweiter", &HashMap::new());
+        let list = stash_list();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].id, second, "neuester Eintrag zuerst");
+        assert_eq!(list[1].id, first);
+    }
+
+    #[test]
+    fn stash_title_truncation_and_whitespace() {
+        // Whitespace-Läufe (Spaces, Tabs, Newlines) kollabieren zu je einem Space.
+        assert_eq!(stash_title("a  b\t\n c   d"), "a b c d");
+        // Rand-Whitespace fällt weg.
+        assert_eq!(
+            stash_title("   führend und  folgend   "),
+            "führend und folgend"
+        );
+
+        // Genau 60 Zeichen bei Umlauten (2-Byte in UTF-8): es wird an
+        // Char-Grenzen geschnitten, nicht an Byte-Offset 60.
+        let umlauts = "ä".repeat(70);
+        let title = stash_title(&umlauts);
+        assert_eq!(title.chars().count(), 60);
+        assert_eq!(title, "ä".repeat(60));
+
+        // Emoji (4-Byte) an der 60er-Grenze wird ganz gehalten oder ganz
+        // weggelassen — nie halbiert.
+        let kept = format!("{}🎉", "x".repeat(59)); // 59 + 1 = 60 Zeichen
+        assert_eq!(stash_title(&kept).chars().count(), 60);
+        assert!(stash_title(&kept).ends_with('🎉'));
+
+        let dropped = format!("{}🎉", "x".repeat(60)); // Emoji wäre Zeichen 61
+        let t = stash_title(&dropped);
+        assert_eq!(t.chars().count(), 60);
+        assert!(!t.contains('🎉'), "Zeichen jenseits 60 fällt weg");
+    }
+
+    #[test]
+    fn stash_title_derived_on_insert() {
+        let _guard = stash_test_guard();
+        // Der Titel wird vom Aufrufer un-vorbereitet gereicht; stash_insert
+        // normalisiert (Whitespace, 60 Zeichen) selbst.
+        let raw = format!("Viele   Wörter\tund\nZeilen {}", "z".repeat(80));
+        let id = stash_insert("reversible", &raw, "voller text", &HashMap::new());
+        let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(meta.title.chars().count(), 60);
+        assert!(meta.title.starts_with("Viele Wörter und Zeilen "));
+    }
+
+    #[test]
+    fn stash_entity_counts_json_roundtrip() {
+        let _guard = stash_test_guard();
+        let original = counts(&[("person", 2), ("iban", 1), ("email", 3)]);
+        let id = stash_insert("reversible", "titel", "text", &original);
+        let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(
+            meta.entity_counts, original,
+            "entity_counts überlebt JSON-Roundtrip"
+        );
+    }
+
+    #[test]
+    fn stash_clear_removes_all() {
+        let _guard = stash_test_guard();
+        stash_insert("strict", "a", "a", &HashMap::new());
+        stash_insert("strict", "b", "b", &HashMap::new());
+        let removed = stash_clear();
+        assert_eq!(removed, 2);
+        assert!(stash_list().is_empty());
     }
 }

@@ -91,7 +91,9 @@ Oder UI-Weg: Systemeinstellungen → Datenschutz & Sicherheit → unten
 
 Beim ersten Hotkey-Druck (Cmd+Option+B / Strg+Alt+B) wird macOS nach
 **Eingabehilfen-Permissions** fragen (Accessibility). Diese braucht
-`enigo`, um synthetisches Cmd+V zu senden:
+`enigo`, um synthetisches Cmd+V zu senden — dieselbe Permission deckt
+auch das synthetische Cmd+C des Capture-Hotkeys der Schwärz-Bühne ab
+(Cmd+Option+Shift+B), es kommt kein zweiter Dialog:
 
 - Systemeinstellungen → Datenschutz & Sicherheit → **Bedienungshilfen**
 - Streichzeug aktivieren

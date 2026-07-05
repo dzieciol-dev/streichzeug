@@ -19,6 +19,24 @@ const Component =
         ? Widget
         : App;
 
+// Globaler Drop-Guard: Ohne `preventDefault` NAVIGIERT die WebView beim
+// Datei-Drop zur Datei — eine gedroppte PDF ersetzt dann die komplette
+// App-UI ohne Weg zurück (Beta-Befund 2026-07-05). Die Komponenten-Handler
+// (App.svelte) laufen in der Bubble-Phase zuerst und verarbeiten Bilder/
+// Text; dieser Fallback fängt alles Unbehandelte ab — auch Drops auf
+// Onboarding-Wizard, Widget-Fenster und Demo-Harnesses, die keine eigenen
+// Handler haben.
+window.addEventListener("dragover", (e) => {
+  if (e.dataTransfer?.types.includes("Files")) {
+    e.preventDefault();
+  }
+});
+window.addEventListener("drop", (e) => {
+  if (e.dataTransfer?.types.includes("Files")) {
+    e.preventDefault();
+  }
+});
+
 // Svelte-5-Mount-API. `new Component(...)` ist zur Laufzeit nicht mehr gültig
 // (component_api_invalid_new); Legacy-Autoring der Komponenten (export let,
 // createEventDispatcher) bleibt davon unberührt.

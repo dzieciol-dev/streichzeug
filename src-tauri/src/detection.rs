@@ -926,7 +926,7 @@ fn luhn_check(digits: &str) -> bool {
         };
         sum += n;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Prüfsumme der deutschen Steuer-ID (BMF-Spezifikation).

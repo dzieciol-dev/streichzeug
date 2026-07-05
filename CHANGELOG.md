@@ -6,6 +6,18 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
+**Neu — Windows: schwebendes Widget + präziseres Capture-Timing:**
+
+- Das schwebende Widget gibt es jetzt auch auf Windows: nicht-aktivierendes
+  Fenster (`WS_EX_NOACTIVATE` + `WS_EX_TOOLWINDOW`) — ein Klick nimmt der
+  Quell-App den Fokus nicht, die Markierung bleibt bestehen, der volle
+  Capture-Flow läuft. Aus Alt+Tab und Taskbar ausgeblendet, frei
+  verschiebbar, Position wird gemerkt.
+- Der Capture-Hotkey wartet auf Windows jetzt auf das **echte** Loslassen
+  der Hotkey-Tasten (`GetAsyncKeyState` statt festem 150-ms-Puffer) —
+  gleiche Robustheit wie auf macOS gegen „gedrückte Modifier kontaminieren
+  das synthetische Strg+C".
+
 **Neu — Schwärz-Bühne Stufe 2: Formatierung bleibt erhalten:**
 
 - Kopiert die Quelle formatiert (Word, Outlook, Browser), liest die Bühne

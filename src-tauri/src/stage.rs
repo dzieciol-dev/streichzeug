@@ -52,9 +52,9 @@ const COPY_ATTEMPTS: u32 = 3;
 
 /// Maximale Wartezeit auf das physische Loslassen der Hotkey-Modifier, bevor
 /// das synthetische Copy rausgeht (siehe [`wait_for_modifiers_released`]).
-/// Nur macOS — der Hardware-Check existiert nur dort, auf anderen
-/// Plattformen wäre die Konstante unused (CI verbietet Warnings).
-#[cfg(target_os = "macos")]
+/// Nur auf Plattformen mit Hardware-Check (macOS/Windows) — sonst wäre die
+/// Konstante unused (CI verbietet Warnings).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const MODIFIER_RELEASE_BUDGET: Duration = Duration::from_millis(1000);
 
 /// Anzeige-Cap: die Segmente decken maximal die ersten 8 000 **Zeichen**
@@ -439,10 +439,41 @@ fn wait_for_modifiers_released() {
     );
 }
 
-/// Nicht-macOS: kein billiger Hardware-Zustands-Check verfügbar (Win bräuchte
-/// `GetAsyncKeyState` aus der windows-Crate, die keine Dependency ist). Fester
-/// Puffer — die Retry-Schleife in [`capture`] übernimmt die Robustheit.
-#[cfg(not(target_os = "macos"))]
+/// Windows-Pendant: echter Hardware-Zustand via `GetAsyncKeyState` — Bit 15
+/// meldet „Taste ist JETZT gedrückt". Gleiche Begründung wie auf macOS: noch
+/// gehaltene Hotkey-Modifier kombinieren sich mit dem injizierten Strg+C,
+/// die Ziel-App sieht dann `Strg+Alt+Shift+C` und kopiert nichts.
+#[cfg(target_os = "windows")]
+fn wait_for_modifiers_released() {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    };
+
+    // SAFETY: GetAsyncKeyState ist ein parameterloser Zustands-Read pro
+    // Virtual-Key, von beliebigen Threads aufrufbar.
+    let any_modifier_down = || {
+        [VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN]
+            .iter()
+            .any(|vk| unsafe { (GetAsyncKeyState(vk.0 as i32) as u16) & 0x8000 != 0 })
+    };
+
+    let start = Instant::now();
+    while start.elapsed() < MODIFIER_RELEASE_BUDGET {
+        if !any_modifier_down() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    log::warn!(
+        "stage: Modifier nach {} ms noch gedrückt — Copy wird trotzdem versucht",
+        MODIFIER_RELEASE_BUDGET.as_millis()
+    );
+}
+
+/// Andere Plattformen (Linux): kein billiger Hardware-Zustands-Check
+/// verfügbar. Fester Puffer — die Retry-Schleife in [`capture`] übernimmt
+/// die Robustheit.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn wait_for_modifiers_released() {
     std::thread::sleep(Duration::from_millis(150));
 }

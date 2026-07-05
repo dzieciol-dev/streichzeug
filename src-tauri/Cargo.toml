@@ -122,7 +122,8 @@ windows = { version = "0.58", features = [
     "Win32_System_DataExchange",
     "Win32_System_Threading",       # OpenProcess
     "Win32_System_ProcessStatus",   # GetModuleFileNameExW
-    "Win32_UI_WindowsAndMessaging", # GetForegroundWindow
+    "Win32_UI_WindowsAndMessaging", # GetForegroundWindow, Get/SetWindowLongPtrW (Widget)
+    "Win32_UI_Input_KeyboardAndMouse", # GetAsyncKeyState (Modifier-Wait im Capture-Flow)
 ] }
 # Hochsprachiges Clipboard-Read; macht uns die OpenClipboard/CloseClipboard/
 # GlobalLock-Dance ab. GetClipboardSequenceNumber polls direkt über windows-rs.

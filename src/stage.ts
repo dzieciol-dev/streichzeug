@@ -13,6 +13,9 @@ export type StageSegment =
     };
 
 // Payload des `stage://job`-Events (Backend → Frontend, Main-Window).
+// Stufe 2: bei content_kind "html" trägt annotated_html die Anzeige
+// (segments ist leer) — außer die Anzeige fiel wegen des Zeichen-Caps auf
+// den Plain-Preview zurück (dann truncated=true und segments gefüllt).
 export type StageJob = {
   job_id: string;
   mode: "reversible" | "strict";
@@ -20,4 +23,6 @@ export type StageJob = {
   finding_count: number;
   truncated: boolean;
   segments: StageSegment[];
+  content_kind: "plain" | "html";
+  annotated_html: string | null;
 };

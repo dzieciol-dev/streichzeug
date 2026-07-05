@@ -141,3 +141,38 @@ impl ClipboardWatcher for WindowsClipboardWatcher {
         }
     }
 }
+
+// =================================================================== Rich-Clipboard (CF_HTML)
+//
+// Stufe 2 der Schwärz-Bühne: HTML-Flavor lesen/schreiben. Das CF_HTML-Format
+// („HTML Format", registriert statt vordefiniert) trägt einen Byte-Offset-
+// Header (StartHTML/EndHTML/StartFragment/EndFragment) — das fummelige
+// Header-Parsen und -Bauen übernimmt `clipboard_win::formats::Html`
+// vollständig (Getter liefert das nackte Fragment, Setter baut den Envelope).
+
+/// Liest den CF_HTML-Flavor und liefert das HTML-Fragment ohne Envelope.
+/// `None`, wenn kein HTML anliegt oder das Format nicht registrierbar ist.
+pub(super) fn read_html() -> Option<String> {
+    let format = clipboard_win::formats::Html::new()?;
+    clipboard_win::get_clipboard::<String, _>(format).ok()
+}
+
+/// Schreibt CF_HTML **und** Unicode-Text in einem Clipboard-Zugriff:
+/// einmal öffnen, leeren, beide Formate setzen. Ziel-Apps ohne HTML-Support
+/// (Editoren, Terminals) bekommen den Text-Fallback.
+pub(super) fn write_html(html: &str, text_fallback: &str) -> Result<(), String> {
+    use clipboard_win::{formats, raw, Clipboard, Setter};
+
+    let format = formats::Html::new()
+        .ok_or_else(|| "CF_HTML (\"HTML Format\") nicht registrierbar".to_string())?;
+    let _clip = Clipboard::new_attempts(10)
+        .map_err(|e| format!("Clipboard nicht zu öffnen: {e:?}"))?;
+    raw::empty().map_err(|e| format!("Clipboard-Empty fehlgeschlagen: {e:?}"))?;
+    formats::Unicode
+        .write_clipboard(&text_fallback)
+        .map_err(|e| format!("Text-Flavor: {e:?}"))?;
+    format
+        .write_clipboard(&html)
+        .map_err(|e| format!("HTML-Flavor: {e:?}"))?;
+    Ok(())
+}

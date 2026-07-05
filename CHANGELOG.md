@@ -6,6 +6,27 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
+**Neu — Schwärz-Bühne Stufe 2: Formatierung bleibt erhalten:**
+
+- Kopiert die Quelle formatiert (Word, Outlook, Browser), liest die Bühne
+  jetzt den HTML-Clipboard-Flavor (macOS `public.html`, Windows `CF_HTML`):
+  die Marker-Animation läuft über dem **formatierten Dokument** (Fettdruck,
+  Tabellen, Farben), und das geschwärzte Ergebnis liegt als HTML **plus**
+  Text-Fallback im Clipboard — Einfügen in Word bleibt formatiert, in
+  Editoren kommt Text an.
+- Ablage-Einträge merken sich die formatierte Fassung („Formatiert"-Badge,
+  „Mit Formatierung kopieren"). Gespeichert wird weiterhin ausschließlich
+  die geschwärzte Fassung.
+- **Sanitizing als Pflichtschritt:** Fremd-HTML wird vor jeder Verarbeitung
+  auf eine strikte Allowlist reduziert. Alle Remote-Referenzen fliegen raus —
+  Tracking-Pixel in HTML-Mails laden nichts nach (No-Outbound-Versprechen);
+  `script`/`iframe`/Event-Handler ebenso. Link-Adressen (`href`) werden
+  entfernt, weil sie nicht durch die Detection laufen (der Linktext bleibt).
+  Eingebettete `data:`-Bilder bleiben bis 256 KB erhalten.
+- Sehr lange formatierte Texte (> 8 000 Zeichen): Anzeige fällt auf die
+  Text-Vorschau zurück, Clipboard und Ablage behalten die volle formatierte
+  Fassung.
+
 **Neu — Schwärz-Bühne (zweiter Workflow):**
 
 - **Markieren → `Strg+Alt+Shift+B` → live zusehen.** Text in einer beliebigen

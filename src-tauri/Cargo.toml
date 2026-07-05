@@ -3,7 +3,8 @@ name = "streichzeug"
 version = "0.5.1"
 description = "Streichzeug — PII-Erkennung und Pseudonymisierung in der Zwischenablage"
 edition = "2021"
-rust-version = "1.77"
+# 1.80 wegen ammonia 4.x (Stufe-2-HTML-Sanitizing); vorher 1.77.
+rust-version = "1.80"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dzieciol-dev/streichzeug"
 authors = ["Streichzeug Contributors"]
@@ -40,6 +41,16 @@ regex = "1.10"
 once_cell = "1.19"
 iban_validate = "5"
 phonenumber = "0.3"
+
+# Stufe 2 (Schwärz-Bühne): HTML-Clipboard formatiert schwärzen.
+# ammonia sanitisiert (Allowlist, Remote-Referenzen raus — No-Outbound),
+# kuchikiki liefert den DOM fürs Finding-Mapping auf Textknoten. Beide rein
+# lokal, kein Netz-Zugriff.
+ammonia = "4"
+kuchikiki = "0.8.8-speedreader"
+# Gleiche Major-Version wie in kuchikiki — für QualName/LocalName beim
+# Erzeugen der Annotations-Spans. NICHT unabhängig bumpen.
+html5ever = "0.29"
 
 # Token format
 hmac = "0.12"

@@ -52,6 +52,9 @@ const COPY_ATTEMPTS: u32 = 3;
 
 /// Maximale Wartezeit auf das physische Loslassen der Hotkey-Modifier, bevor
 /// das synthetische Copy rausgeht (siehe [`wait_for_modifiers_released`]).
+/// Nur macOS — der Hardware-Check existiert nur dort, auf anderen
+/// Plattformen wäre die Konstante unused (CI verbietet Warnings).
+#[cfg(target_os = "macos")]
 const MODIFIER_RELEASE_BUDGET: Duration = Duration::from_millis(1000);
 
 /// Anzeige-Cap: die Segmente decken maximal die ersten 8 000 **Zeichen**

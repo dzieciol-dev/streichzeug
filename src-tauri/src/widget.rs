@@ -40,6 +40,9 @@ use crate::settings::Settings;
 pub const WIDGET_LABEL: &str = "widget";
 
 /// Kantenlänge des quadratischen Widget-Fensters (logische Pixel).
+/// Nur macOS — das Fenster wird nur dort erzeugt, auf anderen Plattformen
+/// wäre die Konstante unused (CI verbietet Warnings).
+#[cfg(target_os = "macos")]
 const WIDGET_SIZE: f64 = 56.0;
 
 /// Zuletzt beobachtete Fensterposition (logische Pixel). Wird bei jedem

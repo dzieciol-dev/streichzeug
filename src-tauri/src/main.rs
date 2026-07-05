@@ -26,7 +26,9 @@ mod detection; // PII-Erkennung (Regex + Gazetteer + Heuristiken)
 mod foreground; // Foreground-App-Detektion (nur bei Auto-Detection genutzt)
 mod gazetteer; // statische DE-Namensliste für Layer 2
 mod hotkey; // Smart-Paste-Handler (primäre UX)
+mod imaging; // Stufe 3: Bild-Pipeline (Boxen-Mapping, PNG-Redaction — reine Logik)
 mod ner; // Layer-3 NER (optional, feature = "ner")
+mod ocr; // Stufe 3: lokale OS-Texterkennung (Apple Vision / Windows.Media.Ocr)
 mod richtext; // Stufe 2: HTML-Sanitizing + Finding-Mapping (reine Logik)
 mod secrets; // HMAC-Master-Secret-Verwaltung
 mod settings; // User-Settings (Hotkey, Auto-Detection-Toggle)
@@ -236,6 +238,18 @@ fn stage_clipboard(app: tauri::AppHandle) {
 #[tauri::command]
 fn stage_text(app: tauri::AppHandle, text: String) {
     stage::capture_from_text(&app, text);
+}
+
+/// Frontend-Command: Bühne mit einer per Drag & Drop hereingezogenen
+/// Bilddatei starten (Stufe 3). Die Bytes kommen als Raw-Body (`invoke`
+/// mit `Uint8Array`) — kein JSON-Umweg für Megabyte-Payloads.
+#[tauri::command]
+fn stage_image(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("stage_image erwartet Raw-Bytes (Uint8Array)".into());
+    };
+    stage::capture_from_image(&app, bytes.clone());
+    Ok(())
 }
 
 /// Widget-Command: voller Capture-Flow inklusive synthetischem Strg+C.
@@ -458,6 +472,7 @@ fn main() {
             stash_clear,
             stage_clipboard,
             stage_text,
+            stage_image,
             stage_capture,
             set_widget_visible,
             widget_menu,

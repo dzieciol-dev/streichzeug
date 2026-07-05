@@ -202,6 +202,23 @@ fn db_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join(APP_DIR).join(DB_FILENAME))
 }
 
+/// Zielpfad für ein geschwärztes Ablage-PNG (Stufe 3):
+/// `$DATA_DIR/de.streichzeug.app/stash-images/<name>.png`. Legt das
+/// Verzeichnis bei Bedarf an. In Test-Builds landet alles im Temp-Dir,
+/// damit Tests das echte App-Datenverzeichnis nie anfassen.
+pub fn stash_image_file_path(name: &str) -> Result<PathBuf, String> {
+    let dir = if cfg!(test) {
+        std::env::temp_dir().join("streichzeug-test-stash-images")
+    } else {
+        dirs::data_dir()
+            .ok_or_else(|| "Kein Daten-Verzeichnis auflösbar".to_string())?
+            .join(APP_DIR)
+            .join("stash-images")
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| format!("stash-images-Verzeichnis: {e}"))?;
+    Ok(dir.join(format!("{name}.png")))
+}
+
 /// WAL-Mode + Schema-Erzeugung. Idempotent — kann beliebig oft laufen.
 fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     // WAL gibt uns Multi-Reader/Single-Writer ohne File-Locking-Stall.
@@ -232,11 +249,15 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             title         TEXT NOT NULL,
             redacted_text TEXT NOT NULL,
             entity_counts TEXT NOT NULL,
-            -- Stufe 2 (Formatierung): 'plain' | 'html'. Bei 'html' hält
-            -- redacted_html die geschwärzte formatierte Fassung — ebenfalls
-            -- NUR geschwärzt, nie Original (gleiche Strict-Mode-Garantie).
+            -- Stufe 2 (Formatierung): 'plain' | 'html' | 'image'. Bei 'html'
+            -- hält redacted_html die geschwärzte formatierte Fassung —
+            -- ebenfalls NUR geschwärzt, nie Original (gleiche
+            -- Strict-Mode-Garantie).
             content_kind  TEXT NOT NULL DEFAULT 'plain',
-            redacted_html TEXT
+            redacted_html TEXT,
+            -- Stufe 3 (Bilder): Pfad des GESCHWÄRZTEN PNG im
+            -- App-Datenverzeichnis. Das Original-Bild wird nie gespeichert.
+            image_path    TEXT
         );
         "#,
     )?;
@@ -257,6 +278,7 @@ fn migrate_stash_rich_columns(conn: &Connection) -> rusqlite::Result<()> {
     for ddl in [
         "ALTER TABLE stash ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'plain'",
         "ALTER TABLE stash ADD COLUMN redacted_html TEXT",
+        "ALTER TABLE stash ADD COLUMN image_path TEXT",
     ] {
         match conn.execute(ddl, []) {
             Ok(_) => {}
@@ -521,13 +543,54 @@ pub fn stash_insert_rich(
     content_kind: &str,
     redacted_html: Option<&str>,
 ) -> i64 {
+    stash_insert_full(
+        mode,
+        title,
+        redacted_text,
+        entity_counts,
+        content_kind,
+        redacted_html,
+        None,
+    )
+}
+
+/// Bild-Eintrag (Stufe 3): `image_path` zeigt auf das GESCHWÄRZTE PNG im
+/// App-Datenverzeichnis; `redacted_text` ist der geschwärzte OCR-Text.
+pub fn stash_insert_image(
+    mode: &str,
+    title: &str,
+    redacted_text: &str,
+    entity_counts: &HashMap<String, u32>,
+    image_path: &str,
+) -> i64 {
+    stash_insert_full(
+        mode,
+        title,
+        redacted_text,
+        entity_counts,
+        "image",
+        None,
+        Some(image_path),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stash_insert_full(
+    mode: &str,
+    title: &str,
+    redacted_text: &str,
+    entity_counts: &HashMap<String, u32>,
+    content_kind: &str,
+    redacted_html: Option<&str>,
+    image_path: Option<&str>,
+) -> i64 {
     let title = stash_title(title);
     let counts_json = serde_json::to_string(entity_counts).unwrap_or_else(|_| "{}".to_string());
     let conn = CONN.lock().expect("CONN mutex poisoned");
     match conn.execute(
-        "INSERT INTO stash (mode, title, redacted_text, entity_counts, content_kind, redacted_html) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![mode, title, redacted_text, counts_json, content_kind, redacted_html],
+        "INSERT INTO stash (mode, title, redacted_text, entity_counts, content_kind, redacted_html, image_path) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![mode, title, redacted_text, counts_json, content_kind, redacted_html, image_path],
     ) {
         Ok(_) => conn.last_insert_rowid(),
         Err(e) => {
@@ -592,10 +655,23 @@ pub fn stash_get_text(id: i64) -> Result<String, String> {
 
 /// Schreibt den geschwärzten Inhalt eines Eintrags ins System-Clipboard —
 /// „Nochmal kopieren" aus der Ablage. HTML-Einträge werden mit beiden
-/// Flavors kopiert (formatiert + Text-Fallback); schlägt der Rich-Write
-/// fehl, bleibt der Text-Write als Fallback.
+/// Flavors kopiert (formatiert + Text-Fallback), Bild-Einträge als Bild +
+/// Text; schlägt der Rich-Write fehl, bleibt der Text-Write als Fallback.
 pub fn stash_copy(id: i64) -> Result<(), String> {
-    let (text, html) = stash_get_content(id)?;
+    let (text, html, image_path) = stash_get_content(id)?;
+    if let Some(path) = image_path {
+        match std::fs::read(&path) {
+            Ok(png) => match crate::clipboard::write_clipboard_image(&png, &text) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    log::warn!("storage: stash_copy image write failed ({e}) — Text-Fallback");
+                }
+            },
+            Err(e) => {
+                log::warn!("storage: stash-Bild {path} nicht lesbar ({e}) — Text-Fallback");
+            }
+        }
+    }
     if let Some(html) = html {
         match crate::clipboard::write_clipboard_html(&html, &text) {
             Ok(()) => return Ok(()),
@@ -607,14 +683,20 @@ pub fn stash_copy(id: i64) -> Result<(), String> {
     crate::clipboard::write_clipboard_text(&text)
 }
 
-/// Liefert `(redacted_text, redacted_html)` eines Eintrags. `Err`, wenn die
-/// ID nicht (mehr) existiert.
-fn stash_get_content(id: i64) -> Result<(String, Option<String>), String> {
+/// Liefert `(redacted_text, redacted_html, image_path)` eines Eintrags.
+/// `Err`, wenn die ID nicht (mehr) existiert.
+fn stash_get_content(id: i64) -> Result<(String, Option<String>, Option<String>), String> {
     let conn = CONN.lock().expect("CONN mutex poisoned");
     conn.query_row(
-        "SELECT redacted_text, redacted_html FROM stash WHERE id = ?1",
+        "SELECT redacted_text, redacted_html, image_path FROM stash WHERE id = ?1",
         params![id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
     )
     .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => format!("Ablage-Eintrag {id} nicht gefunden"),
@@ -622,20 +704,53 @@ fn stash_get_content(id: i64) -> Result<(String, Option<String>), String> {
     })
 }
 
-/// Löscht einen einzelnen Eintrag. Idempotent: eine bereits fehlende ID ist
-/// kein Fehler.
-pub fn stash_delete(id: i64) -> Result<(), String> {
-    let conn = CONN.lock().expect("CONN mutex poisoned");
-    conn.execute("DELETE FROM stash WHERE id = ?1", params![id])
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+/// Löscht die PNG-Dateien der übergebenen Pfade (Best-Effort). Bild-Einträge
+/// hinterlassen sonst verwaiste geschwärzte PNGs im App-Datenverzeichnis.
+fn remove_image_files(paths: &[String]) {
+    for path in paths {
+        if let Err(e) = std::fs::remove_file(path) {
+            log::debug!("storage: stash-Bild {path} nicht gelöscht ({e})");
+        }
+    }
 }
 
-/// Leert die gesamte Ablage und liefert die Anzahl gelöschter Einträge.
-/// Vom „Alle löschen"-Button und optional beim App-Quit gerufen.
+/// Löscht einen einzelnen Eintrag (inkl. zugehöriger PNG-Datei bei
+/// Bild-Einträgen). Idempotent: eine bereits fehlende ID ist kein Fehler.
+pub fn stash_delete(id: i64) -> Result<(), String> {
+    let conn = CONN.lock().expect("CONN mutex poisoned");
+    let image_path: Option<String> = conn
+        .query_row(
+            "SELECT image_path FROM stash WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
+    let result = conn
+        .execute("DELETE FROM stash WHERE id = ?1", params![id])
+        .map(|_| ())
+        .map_err(|e| e.to_string());
+    drop(conn);
+    if result.is_ok() {
+        if let Some(path) = image_path {
+            remove_image_files(&[path]);
+        }
+    }
+    result
+}
+
+/// Leert die gesamte Ablage (inkl. PNG-Dateien der Bild-Einträge) und
+/// liefert die Anzahl gelöschter Einträge. Vom „Alle löschen"-Button und
+/// optional beim App-Quit gerufen.
 pub fn stash_clear() -> usize {
     let conn = CONN.lock().expect("CONN mutex poisoned");
-    match conn.execute("DELETE FROM stash", []) {
+    let image_paths: Vec<String> = conn
+        .prepare("SELECT image_path FROM stash WHERE image_path IS NOT NULL")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+    let removed = match conn.execute("DELETE FROM stash", []) {
         Ok(n) => {
             if n > 0 {
                 log::info!("storage: cleared {n} stash entries");
@@ -646,7 +761,12 @@ pub fn stash_clear() -> usize {
             log::warn!("storage: stash_clear failed: {e}");
             0
         }
+    };
+    drop(conn);
+    if removed > 0 {
+        remove_image_files(&image_paths);
     }
+    removed
 }
 
 #[cfg(test)]
@@ -945,9 +1065,10 @@ mod tests {
         let id = stash_insert("reversible", "t", "text", &HashMap::new());
         let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
         assert_eq!(meta.content_kind, "plain");
-        let (text, html) = stash_get_content(id).unwrap();
+        let (text, html, image) = stash_get_content(id).unwrap();
         assert_eq!(text, "text");
         assert!(html.is_none(), "plain-Eintrag hat kein redacted_html");
+        assert!(image.is_none(), "plain-Eintrag hat kein image_path");
     }
 
     #[test]
@@ -966,7 +1087,7 @@ mod tests {
         assert_eq!(meta.content_kind, "html");
         // char_len bezieht sich weiterhin auf den Text, nicht das HTML.
         assert_eq!(meta.char_len, "«P_a» im Text".chars().count());
-        let (text, html) = stash_get_content(id).unwrap();
+        let (text, html, _image) = stash_get_content(id).unwrap();
         assert_eq!(text, "«P_a» im Text");
         assert_eq!(html.as_deref(), Some("<p>«P_a» im <b>Text</b></p>"));
     }
@@ -985,5 +1106,54 @@ mod tests {
         let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
         assert_eq!(meta.title, "bleibt");
         assert_eq!(meta.content_kind, "plain");
+    }
+
+    #[test]
+    fn stash_image_roundtrip_and_file_cleanup() {
+        let _guard = stash_test_guard();
+
+        // Geschwärztes „PNG" als Datei anlegen (Inhalt egal — es geht um
+        // Pfad-Verwaltung und Datei-Lifecycle).
+        let png_path = stash_image_file_path("test-roundtrip").expect("Pfad auflösbar");
+        std::fs::write(&png_path, b"fake-png").unwrap();
+        let path_str = png_path.to_string_lossy().to_string();
+
+        let id = stash_insert_image(
+            "reversible",
+            "«P_a» im Scan",
+            "«P_a» im Scan",
+            &counts(&[("person", 1)]),
+            &path_str,
+        );
+        assert!(id > 0);
+
+        let meta = stash_list().into_iter().find(|m| m.id == id).unwrap();
+        assert_eq!(meta.content_kind, "image");
+
+        let (text, html, image) = stash_get_content(id).unwrap();
+        assert_eq!(text, "«P_a» im Scan");
+        assert!(html.is_none());
+        assert_eq!(image.as_deref(), Some(path_str.as_str()));
+
+        // Löschen räumt die PNG-Datei mit weg.
+        stash_delete(id).unwrap();
+        assert!(!png_path.exists(), "PNG muss beim Löschen mitgehen");
+    }
+
+    #[test]
+    fn stash_clear_removes_image_files() {
+        let _guard = stash_test_guard();
+        let png_path = stash_image_file_path("test-clear").expect("Pfad auflösbar");
+        std::fs::write(&png_path, b"fake-png").unwrap();
+        stash_insert_image(
+            "strict",
+            "t",
+            "t",
+            &HashMap::new(),
+            &png_path.to_string_lossy(),
+        );
+        let removed = stash_clear();
+        assert_eq!(removed, 1);
+        assert!(!png_path.exists(), "PNG muss beim Leeren mitgehen");
     }
 }

@@ -386,8 +386,16 @@
     void setWidgetVisible((e.currentTarget as HTMLInputElement).checked);
   }
 
+  // Akzeptiert Text-Markierungen (Stufe 1) und Dateien (Stufe 3: Bilder).
+  // Datei-Drops kommen über HTML5 `dataTransfer.files` — `dragDropEnabled`
+  // ist am Main-Window aus, Tauri fängt hier nichts ab (Konzept WP-J).
+  function isStageDrag(e: DragEvent): boolean {
+    const types = e.dataTransfer?.types;
+    return !!types && (types.includes("text/plain") || types.includes("Files"));
+  }
+
   function onDragEnter(e: DragEvent) {
-    if (e.dataTransfer?.types.includes("text/plain")) {
+    if (isStageDrag(e)) {
       dragDepth += 1;
     }
   }
@@ -398,7 +406,7 @@
 
   function onDragOver(e: DragEvent) {
     // Nötig, damit der Browser den Drop überhaupt zulässt.
-    if (e.dataTransfer?.types.includes("text/plain")) {
+    if (isStageDrag(e)) {
       e.preventDefault();
     }
   }
@@ -406,6 +414,22 @@
   async function onDrop(e: DragEvent) {
     e.preventDefault();
     dragDepth = 0;
+
+    // Bilddatei (Stufe 3): Bytes als Raw-Body an stage_image — die Bühne
+    // übernimmt Texterkennung + Schwärzung.
+    const file = Array.from(e.dataTransfer?.files ?? []).find((f) =>
+      f.type.startsWith("image/")
+    );
+    if (file) {
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await invoke("stage_image", bytes);
+      } catch (err) {
+        console.error("stage_image failed", err);
+      }
+      return;
+    }
+
     const text = e.dataTransfer?.getData("text/plain") ?? "";
     if (!text) return;
     try {

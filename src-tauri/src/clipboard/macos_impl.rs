@@ -212,3 +212,48 @@ pub(super) unsafe fn write_html(html: &str, text_fallback: &str) -> Result<(), S
         )),
     }
 }
+
+/// Liest den Bild-Flavor der Pasteboard: bevorzugt `public.png`, sonst
+/// `public.tiff` (viele Apps legen nur TIFF ab — dekodiert die
+/// Bild-Pipeline genauso). Gleiche Prompt-Vorsicht wie [`read_text`].
+///
+/// # Safety
+///
+/// Gleiche Threading-Annahme wie [`current_change_count`].
+pub(super) unsafe fn read_image() -> Option<Vec<u8>> {
+    let pb = NSPasteboard::generalPasteboard();
+    for uti in ["public.png", "public.tiff"] {
+        let ns_type = NSString::from_str(uti);
+        if let Some(data) = pb.dataForType(&ns_type) {
+            return Some(data.bytes().to_vec());
+        }
+    }
+    None
+}
+
+/// Schreibt PNG-Bytes und Text-Fallback in einem Zug (EIN `clearContents`).
+/// `Err`, sobald einer der Writes NO liefert — gleiche Ehrlichkeits-Regel
+/// wie [`write_html`].
+///
+/// # Safety
+///
+/// Gleiche Threading-Annahme wie [`current_change_count`].
+pub(super) unsafe fn write_image(png: &[u8], text_fallback: &str) -> Result<(), String> {
+    use objc2_foundation::NSData;
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    let png_ok = pb.setData_forType(
+        Some(&NSData::with_bytes(png)),
+        &NSString::from_str("public.png"),
+    );
+    let text_ok = pb.setString_forType(
+        &NSString::from_str(text_fallback),
+        &NSString::from_str("public.utf8-plain-text"),
+    );
+    match (png_ok, text_ok) {
+        (true, true) => Ok(()),
+        (p, t) => Err(format!(
+            "NSPasteboard-Write lieferte NO (png_ok={p}, text_ok={t})"
+        )),
+    }
+}

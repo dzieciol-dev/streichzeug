@@ -491,10 +491,20 @@ Formatierung kopieren".
 ## 5. Arbeitspakete Stufe 3 (Bilder/OCR) — nach Stufe 2
 
 Verträge-Erweiterung: `content_kind: "image"`; Job-Payload bekommt
-`image_path` (temporäre PNG-Kopie im App-Datenverzeichnis) +
+`image_data_url` (metadaten-freie PNG-Kopie des Originals als `data:`-URL) +
 `boxes: [{x,y,w,h, entity_type, replacement}]` (normierte Koordinaten
-0–1); `stash` speichert Pfad des **geschwärzten** PNG (Original-Bild wird
-nach Verarbeitung gelöscht).
+0–1, Ursprung oben links) + `ocr_based: true`; `stash` speichert den Pfad
+des **geschwärzten** PNG (Spalte `image_path`, Dateien unter
+`stash-images/`, werden bei Löschen/Leeren mit entfernt).
+
+> **Abweichung vom ursprünglichen Vertrag (umgesetzt 2026-07-05):** Statt
+> einer temporären PNG-Datei (`image_path` im Payload, „Original wird nach
+> Verarbeitung gelöscht") wandert die Anzeige-Kopie des Originals als
+> `data:`-URL durch den Event — das **Original berührt nie die Platte**,
+> und der unklare Lösch-Zeitpunkt („nach Verarbeitung" vs. „Bühne zeigt es
+> noch") entfällt komplett. Persistiert wird ausschließlich das geschwärzte
+> PNG. `OcrWord` trägt zusätzlich ein `line`-Feld (beide OS-APIs liefern
+> Zeilen nativ; das Mapping braucht sie für die Box-Union pro Zeile).
 
 ### WP-I — Backend: OCR-Adapter + Bild-Pipeline
 

@@ -176,3 +176,43 @@ pub(super) fn write_html(html: &str, text_fallback: &str) -> Result<(), String> 
         .map_err(|e| format!("HTML-Flavor: {e:?}"))?;
     Ok(())
 }
+
+// =================================================================== Bild-Clipboard (Stufe 3)
+
+/// Liest den Bild-Flavor als BMP-Bytes (`CF_DIB`, von clipboard-win mit
+/// BMP-File-Header versehen) — die Bild-Pipeline dekodiert BMP direkt.
+pub(super) fn read_image() -> Option<Vec<u8>> {
+    clipboard_win::get_clipboard::<Vec<u8>, _>(clipboard_win::formats::Bitmap).ok()
+}
+
+/// Schreibt ein geschwärztes Bild (PNG-Bytes) plus Text-Fallback: PNG wird
+/// für `CF_DIB` nach BMP konvertiert (verlustfrei, nur Container-Wechsel);
+/// zusätzlich wird das rohe PNG unter dem registrierten `PNG`-Format
+/// abgelegt (Office/Browser bevorzugen es und behalten damit die
+/// verlustfreie Fassung).
+pub(super) fn write_image(png: &[u8], text_fallback: &str) -> Result<(), String> {
+    use clipboard_win::{formats, raw, Clipboard, Setter};
+
+    // PNG → BMP für CF_DIB.
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| format!("PNG nicht dekodierbar: {e}"))?;
+    let mut bmp = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut bmp, image::ImageFormat::Bmp)
+        .map_err(|e| format!("BMP-Encode: {e}"))?;
+
+    let _clip = Clipboard::new_attempts(10)
+        .map_err(|e| format!("Clipboard nicht zu öffnen: {e:?}"))?;
+    raw::empty().map_err(|e| format!("Clipboard-Empty fehlgeschlagen: {e:?}"))?;
+    formats::Unicode
+        .write_clipboard(&text_fallback)
+        .map_err(|e| format!("Text-Flavor: {e:?}"))?;
+    formats::Bitmap
+        .write_clipboard(&bmp.into_inner())
+        .map_err(|e| format!("Bitmap-Flavor: {e:?}"))?;
+    // Rohes PNG als registriertes "PNG"-Format (Best-Effort — CF_DIB reicht
+    // als Minimalversorgung).
+    if let Some(png_format) = raw::register_format("PNG") {
+        let _ = raw::set_without_clear(png_format.get(), png);
+    }
+    Ok(())
+}

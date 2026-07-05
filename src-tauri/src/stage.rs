@@ -109,13 +109,27 @@ struct StageJob {
     truncated: bool,
     /// Anzeige-Reihenfolge = Array-Reihenfolge.
     segments: Vec<Segment>,
-    /// `"plain"` | `"html"` (Stufe 2). Bei `"html"` trägt `annotated_html`
-    /// die Anzeige; `segments` ist dann leer — außer die Anzeige fällt wegen
-    /// des Zeichen-Caps auf den Plain-Preview zurück (`truncated: true`).
+    /// `"plain"` | `"html"` (Stufe 2) | `"image"` (Stufe 3). Bei `"html"`
+    /// trägt `annotated_html` die Anzeige; `segments` ist dann leer — außer
+    /// die Anzeige fällt wegen der Caps auf den Plain-Preview zurück
+    /// (`truncated: true`). Bei `"image"` tragen `image_data_url` + `boxes`
+    /// die Anzeige, `segments` den erkannten Text darunter.
     content_kind: String,
     /// Sanitisiertes HTML mit `data-sz-finding`-Spans für die
     /// Marker-Animation. Nur bei `content_kind: "html"`.
     annotated_html: Option<String>,
+    /// Metadaten-freie PNG-Kopie des ORIGINALS als `data:`-URL — die Bühne
+    /// zeigt sie und animiert die Balken darüber. Bewusst KEIN Temp-File:
+    /// das Original berührt nie die Platte (dokumentierte Abweichung vom
+    /// Konzept-Vertrag Abschnitt 5). Nur bei `content_kind: "image"`.
+    image_data_url: Option<String>,
+    /// Schwärz-Boxen (normiert 0–1, Ursprung oben links) für die
+    /// Balken-Animation über dem Bild. Nur bei `content_kind: "image"`.
+    boxes: Vec<crate::imaging::RedactionBox>,
+    /// Ehrlichkeits-Flag (Vertrag Stufe 3): das Ergebnis basiert auf
+    /// Texterkennung — was OCR nicht liest, bleibt sichtbar. Das UI zeigt
+    /// dann den Prüf-Warnhinweis.
+    ocr_based: bool,
 }
 
 /// Ergebnis der reinen Klassifikation des gecaptureten Clipboard-Texts.
@@ -143,7 +157,7 @@ fn classify_capture(text: Option<String>) -> CaptureDecision {
     }
 }
 
-/// Der aufbereitete Bühnen-Inhalt nach der Format-Entscheidung (Stufe 2).
+/// Der aufbereitete Bühnen-Inhalt nach der Format-Entscheidung (Stufe 2/3).
 enum StageContent {
     /// Plain-Text-Flow wie in Stufe 1.
     Plain(String),
@@ -158,6 +172,10 @@ enum StageContent {
         parsed: crate::richtext::ParsedRichText,
         text_flavor: Option<String>,
     },
+    /// Bild-Flow (Stufe 3): rohe Bild-Bytes (PNG/JPEG/BMP/TIFF) aus
+    /// Clipboard oder Datei-Drop — Dekodierung/OCR passieren erst im Flow,
+    /// damit Fehler dort einheitlich in den Fehler-State laufen.
+    Image(Vec<u8>),
 }
 
 // `ParsedRichText` hat kein `Debug`/`PartialEq` (DOM-Baum) — für Test-
@@ -171,15 +189,21 @@ impl std::fmt::Debug for StageContent {
                 .field("plaintext", &parsed.plaintext())
                 .field("text_flavor", text_flavor)
                 .finish(),
+            StageContent::Image(bytes) => f
+                .debug_struct("Image")
+                .field("bytes", &bytes.len())
+                .finish(),
         }
     }
 }
 
-/// Entscheidet zwischen HTML- und Plain-Flow. HTML gewinnt, wenn ein
+/// Entscheidet zwischen HTML-, Plain- und Bild-Flow. HTML gewinnt, wenn ein
 /// HTML-Flavor anliegt, unter dem Größen-Cap bleibt und nach dem Sanitizing
 /// noch **sichtbarer** Text übrig ist — der von uns injizierte
 /// „[Bild entfernt]"-Platzhalter zählt nicht (ein Nur-Bild-HTML muss auf den
-/// Text-Flavor zurückfallen, sonst bliebe dessen Inhalt ungescannt).
+/// Text-Flavor zurückfallen, sonst bliebe dessen Inhalt ungescannt). Das
+/// Bild greift als LETZTES: nur wenn weder Text noch HTML brauchbar sind
+/// (typisch Screenshot im Clipboard — der hat gar keinen Text-Flavor).
 ///
 /// Sanitizing passiert bewusst HIER, vor jeder weiteren Verarbeitung: ab
 /// diesem Punkt existiert das Original-HTML (mit Tracking-Pixeln, Scripts,
@@ -187,6 +211,7 @@ impl std::fmt::Debug for StageContent {
 fn prepare_content(
     text: Option<String>,
     html: Option<String>,
+    image: Option<Vec<u8>>,
 ) -> Result<StageContent, CaptureDecision> {
     let (text_flavor, text_error) = match classify_capture(text) {
         CaptureDecision::Proceed(t) => (Some(t), None),
@@ -214,11 +239,18 @@ fn prepare_content(
             );
         }
     }
-    match (text_flavor, text_error) {
-        (Some(t), _) => Ok(StageContent::Plain(t)),
-        (None, Some(err)) => Err(err),
-        (None, None) => Err(CaptureDecision::Empty),
+    if let Some(t) = text_flavor {
+        return Ok(StageContent::Plain(t));
     }
+    if let Some(bytes) = image {
+        if !bytes.is_empty() && bytes.len() <= MAX_CLIPBOARD_BYTES {
+            return Ok(StageContent::Image(bytes));
+        }
+        if bytes.len() > MAX_CLIPBOARD_BYTES {
+            return Err(CaptureDecision::TooLarge(bytes.len()));
+        }
+    }
+    Err(text_error.unwrap_or(CaptureDecision::Empty))
 }
 
 /// Erkennt, ob sich der Clipboard-Inhalt gegenüber `prev` geändert hat — die
@@ -552,27 +584,33 @@ pub fn capture(app: &AppHandle) {
         }
     };
 
-    // Stufe 2: HTML-Flavor mitnehmen, wenn die Quelle formatiert kopiert hat
-    // (Word/Outlook/Browser legen HTML neben den Plain-Text). Der Flavor wird
-    // nur übernommen, wenn das Clipboard noch DENSELBEN Text trägt wie beim
-    // Capture — sonst hat ein Clipboard-Manager/Sync-Tool den Inhalt zwischen
-    // Poll-Erfolg und HTML-Read ersetzt, und wir würden fremden Inhalt
-    // schwärzen statt der Markierung des Users.
-    let html = match &text_to_use {
+    // Stufe 2/3: HTML- und Bild-Flavor mitnehmen, wenn die Quelle sie
+    // liefert (Word/Outlook/Browser legen HTML neben den Plain-Text;
+    // Screenshots liegen NUR als Bild da). Die Flavors werden nur
+    // übernommen, wenn das Clipboard noch DENSELBEN Text trägt wie beim
+    // Capture — sonst hat ein Clipboard-Manager/Sync-Tool den Inhalt
+    // zwischen Poll-Erfolg und Flavor-Read ersetzt, und wir würden fremden
+    // Inhalt schwärzen statt der Markierung des Users. Ohne Text-Capture
+    // (z. B. Screenshot) gibt es keinen Poll-Anker — dann wird direkt
+    // gelesen.
+    let (html, image) = match &text_to_use {
         Some(t)
             if crate::clipboard::read_clipboard_text().as_deref() == Some(t.as_str()) =>
         {
-            crate::clipboard::read_clipboard_html()
+            (crate::clipboard::read_clipboard_html(), None)
         }
         Some(_) => {
             log::info!(
-                "stage: Clipboard-Text hat sich seit dem Capture geändert — HTML-Flavor ignoriert"
+                "stage: Clipboard-Text hat sich seit dem Capture geändert — Flavors ignoriert"
             );
-            None
+            (None, None)
         }
-        None => None,
+        None => (
+            crate::clipboard::read_clipboard_html(),
+            crate::clipboard::read_clipboard_image(),
+        ),
     };
-    run_stage(app, text_to_use, html);
+    run_stage(app, text_to_use, html, image);
 }
 
 /// Einstieg ohne synthetischen Copy: schwärzt den **aktuellen** Clipboard-
@@ -585,6 +623,7 @@ pub fn capture_from_clipboard(app: &AppHandle) {
         app,
         crate::clipboard::read_clipboard_text(),
         crate::clipboard::read_clipboard_html(),
+        crate::clipboard::read_clipboard_image(),
     );
 }
 
@@ -593,15 +632,29 @@ pub fn capture_from_clipboard(app: &AppHandle) {
 /// ohne Clipboard und ohne synthetische Tastendrücke.
 pub fn capture_from_text(app: &AppHandle, text: String) {
     log::info!("stage: capture from dropped text ({} bytes)", text.len());
-    run_stage(app, Some(text), None);
+    run_stage(app, Some(text), None, None);
+}
+
+/// Einstieg mit direkt übergebenen Bild-Bytes: für den Datei-Drop einer
+/// Bilddatei ins Fenster (HTML5 `dataTransfer.files` — `dragDropEnabled`
+/// ist am Main-Window aus, s. Konzept WP-J).
+pub fn capture_from_image(app: &AppHandle, bytes: Vec<u8>) {
+    log::info!("stage: capture from dropped image ({} bytes)", bytes.len());
+    run_stage(app, None, None, Some(bytes));
 }
 
 /// Gemeinsamer Kern hinter allen Einstiegen: klassifizieren, schwärzen,
 /// Ablage, Event, Fenster. Entspricht Vertrag 2.5 ab Schritt 5; Stufe 2
-/// zweigt bei vorhandenem HTML-Flavor in den formatierten Flow ab.
-fn run_stage(app: &AppHandle, text_to_use: Option<String>, html_to_use: Option<String>) {
+/// zweigt bei vorhandenem HTML-Flavor in den formatierten Flow ab, Stufe 3
+/// bei Bild-Inhalten in den OCR-Flow.
+fn run_stage(
+    app: &AppHandle,
+    text_to_use: Option<String>,
+    html_to_use: Option<String>,
+    image_to_use: Option<Vec<u8>>,
+) {
     // 5. Format-Entscheidung + Klassifikation: leer/zu groß → Fehler-State.
-    let content = match prepare_content(text_to_use, html_to_use) {
+    let content = match prepare_content(text_to_use, html_to_use, image_to_use) {
         Ok(c) => c,
         Err(CaptureDecision::TooLarge(n)) => {
             log::warn!(
@@ -617,10 +670,17 @@ fn run_stage(app: &AppHandle, text_to_use: Option<String>, html_to_use: Option<S
         }
     };
 
+    let settings = Settings::load();
+
+    // Stufe 3: Bild-Flow ist eigenständig (OCR statt Text-Flavors).
+    if let StageContent::Image(bytes) = content {
+        run_stage_image(app, &bytes, &settings);
+        return;
+    }
+
     // 6. Detection — **nur Forward** (die Bühne macht kein Reverse). Beim
     // HTML-Flow läuft die Detection auf dem extrahierten Plaintext; die
     // Offsets passen damit zu `richtext::redact`.
-    let settings = Settings::load();
     let (detection_text, html_ctx) = match content {
         StageContent::Plain(t) => (t, None),
         StageContent::Html {
@@ -631,6 +691,7 @@ fn run_stage(app: &AppHandle, text_to_use: Option<String>, html_to_use: Option<S
             parsed.plaintext().to_string(),
             Some((sanitized, parsed, text_flavor)),
         ),
+        StageContent::Image(_) => unreachable!("oben behandelt"),
     };
     let (mode, job_id, findings, redacted) = run_forward(&detection_text, &settings);
     let finding_count = findings.len();
@@ -730,8 +791,132 @@ fn run_stage(app: &AppHandle, text_to_use: Option<String>, html_to_use: Option<S
         segments,
         content_kind: content_kind.to_string(),
         annotated_html,
+        image_data_url: None,
+        boxes: Vec::new(),
+        ocr_based: false,
     };
     emit_and_show(app, &payload);
+}
+
+/// Bild-Flow (Stufe 3, Vertrag Abschnitt 5): metadaten-freie PNG-Kopie,
+/// lokale OS-OCR, Detection auf dem erkannten Text, Balken-Boxen, geschwärztes
+/// PNG in Clipboard + Ablage. Die Anzeige bekommt das ORIGINAL als data:-URL
+/// plus die Boxen — die Balken-Animation läuft im Frontend darüber.
+fn run_stage_image(app: &AppHandle, bytes: &[u8], settings: &Settings) {
+    // Dekodieren + Re-Encode: einheitliches PNG, EXIF/GPS/XMP sind weg.
+    let (display_png, _w, _h) = match crate::imaging::reencode_png(bytes) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("stage: Bild unbrauchbar ({e}) — Fehler-State");
+            emit_error_state(app);
+            return;
+        }
+    };
+
+    // Lokale OS-Texterkennung (Apple Vision / Windows.Media.Ocr).
+    let words = match crate::ocr::recognize(&display_png) {
+        Ok(w) => w,
+        Err(e) => {
+            log::warn!("stage: Texterkennung fehlgeschlagen ({e}) — Fehler-State");
+            emit_error_state(app);
+            return;
+        }
+    };
+    log::info!("stage: OCR hat {} Wörter erkannt", words.len());
+
+    let (ocr_text, spans) = crate::imaging::assemble_text(&words);
+    let (mode, job_id, findings, redacted) = run_forward(&ocr_text, settings);
+    let finding_count = findings.len();
+    let boxes = crate::imaging::map_findings_to_boxes(&findings, &words, &spans);
+    let (segments, truncated) = build_segments(&ocr_text, &findings);
+
+    // Bei ≥ 1 Finding: geschwärztes PNG rendern → Clipboard (Bild + Text)
+    // und Ablage (PNG-Datei + Eintrag). Bei 0 Findings: nichts anfassen.
+    let stash_id = if finding_count >= 1 {
+        stash_redacted_image(&display_png, &boxes, mode, &redacted, &findings, &job_id)
+    } else {
+        log::info!(
+            "stage: keine personenbezogenen Daten im erkannten Text — Clipboard unverändert"
+        );
+        None
+    };
+
+    use base64::Engine as _;
+    let payload = StageJob {
+        job_id,
+        mode: mode.to_string(),
+        stash_id,
+        finding_count,
+        truncated,
+        segments,
+        content_kind: "image".to_string(),
+        annotated_html: None,
+        image_data_url: Some(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&display_png)
+        )),
+        boxes,
+        ocr_based: true,
+    };
+    emit_and_show(app, &payload);
+}
+
+/// Rendert die Balken ins Bild, schreibt das Ergebnis ins Clipboard
+/// (Bild + Text-Fallback) und legt es als PNG-Datei + Ablage-Eintrag ab.
+/// Fehlerpfade nur loggen — Clipboard und Ablage sind unabhängig nützlich.
+fn stash_redacted_image(
+    display_png: &[u8],
+    boxes: &[crate::imaging::RedactionBox],
+    mode: &str,
+    redacted_text: &str,
+    findings: &[Finding],
+    job_id: &str,
+) -> Option<i64> {
+    let mut img = match crate::imaging::decode_image(display_png) {
+        Ok(i) => i,
+        Err(e) => {
+            log::warn!("stage: Redaction-Decode fehlgeschlagen ({e})");
+            return None;
+        }
+    };
+    crate::imaging::render_redactions(&mut img, boxes);
+    let redacted_png = match crate::imaging::encode_png(&img) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("stage: Redaction-Encode fehlgeschlagen ({e})");
+            return None;
+        }
+    };
+
+    // Clipboard zuerst (Vertrag: Ergebnis liegt sofort im Clipboard).
+    if let Err(e) = crate::clipboard::write_clipboard_image(&redacted_png, redacted_text) {
+        log::warn!("stage: clipboard image write failed: {e}");
+    }
+
+    let path = match storage::stash_image_file_path(job_id) {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("stage: {e}");
+            return None;
+        }
+    };
+    if let Err(e) = std::fs::write(&path, &redacted_png) {
+        log::warn!("stage: stash-PNG nicht geschrieben ({e})");
+        return None;
+    }
+    let counts = aggregate_entity_counts(findings);
+    let id = storage::stash_insert_image(
+        mode,
+        redacted_text,
+        redacted_text,
+        &counts,
+        &path.to_string_lossy(),
+    );
+    log::info!(
+        "stage: {} Finding(s) im Bild geschwärzt, Ablage-Eintrag #{id} (mode={mode})",
+        findings.len()
+    );
+    Some(id)
 }
 
 /// Reine Anzeige-Entscheidung: passt das annotierte Dokument in die Bühne,
@@ -826,6 +1011,9 @@ fn emit_error_state(app: &AppHandle) {
         segments: Vec::new(),
         content_kind: "plain".to_string(),
         annotated_html: None,
+        image_data_url: None,
+        boxes: Vec::new(),
+        ocr_based: false,
     };
     emit_and_show(app, &payload);
 }
@@ -1202,6 +1390,9 @@ mod tests {
             }],
             content_kind: "plain".into(),
             annotated_html: None,
+            image_data_url: None,
+            boxes: Vec::new(),
+            ocr_based: false,
         };
         let j = serde_json::to_value(&job).unwrap();
         assert_eq!(j["job_id"], "c3f9");
@@ -1225,6 +1416,9 @@ mod tests {
             segments: Vec::new(),
             content_kind: "plain".into(),
             annotated_html: None,
+            image_data_url: None,
+            boxes: Vec::new(),
+            ocr_based: false,
         };
         let j = serde_json::to_value(&job).unwrap();
         assert!(j["stash_id"].is_null());
@@ -1237,6 +1431,7 @@ mod tests {
         let content = prepare_content(
             Some("Fallback-Text".into()),
             Some("<p>Hallo <b>Max</b></p>".into()),
+            None,
         )
         .unwrap();
         match content {
@@ -1266,6 +1461,7 @@ mod tests {
         let content = prepare_content(
             Some("Nur Text".into()),
             Some(r#"<img src="https://tracker.example/p.gif">"#.into()),
+            None,
         )
         .unwrap();
         assert!(
@@ -1273,32 +1469,54 @@ mod tests {
             "erwartet Plain-Fallback, got: {content:?}"
         );
 
-        let empty = prepare_content(Some("Nur Text".into()), Some("<p>  </p>".into())).unwrap();
+        let empty = prepare_content(Some("Nur Text".into()), Some("<p>  </p>".into()), None).unwrap();
         assert!(matches!(&empty, StageContent::Plain(t) if t == "Nur Text"));
 
         // Nur-Bild-HTML UND leerer Text-Flavor → Fehler-State, keine Bühne
         // voller Platzhalter.
-        assert!(prepare_content(None, Some(r#"<img src="https://x.example/p.gif">"#.into()))
+        assert!(prepare_content(None, Some(r#"<img src="https://x.example/p.gif">"#.into()), None)
             .is_err());
     }
 
     #[test]
     fn prepare_without_html_is_plain() {
-        let content = prepare_content(Some("abc".into()), None).unwrap();
+        let content = prepare_content(Some("abc".into()), None, None).unwrap();
         assert!(matches!(&content, StageContent::Plain(t) if t == "abc"));
     }
 
     #[test]
     fn prepare_oversized_html_falls_back_to_text() {
         let big_html = format!("<p>{}</p>", "x".repeat(MAX_CLIPBOARD_BYTES + 1));
-        let content = prepare_content(Some("klein".into()), Some(big_html)).unwrap();
+        let content = prepare_content(Some("klein".into()), Some(big_html), None).unwrap();
         assert!(matches!(&content, StageContent::Plain(t) if t == "klein"));
     }
 
     #[test]
     fn prepare_empty_everything_is_error() {
-        assert!(prepare_content(None, None).is_err());
-        assert!(prepare_content(Some(String::new()), Some(String::new())).is_err());
+        assert!(prepare_content(None, None, None).is_err());
+        assert!(prepare_content(Some(String::new()), Some(String::new()), None).is_err());
+    }
+
+    #[test]
+    fn prepare_image_only_when_no_text_flavors() {
+        // Screenshot-Fall: nur Bild im Clipboard → Bild-Flow.
+        let content = prepare_content(None, None, Some(vec![1, 2, 3])).unwrap();
+        assert!(matches!(&content, StageContent::Image(b) if b == &vec![1, 2, 3]));
+
+        // Text schlägt Bild (Bild greift nur als letztes).
+        let content =
+            prepare_content(Some("Text".into()), None, Some(vec![1, 2, 3])).unwrap();
+        assert!(matches!(&content, StageContent::Plain(t) if t == "Text"));
+
+        // Übergroßes Bild → TooLarge statt Empty.
+        let big = vec![0u8; MAX_CLIPBOARD_BYTES + 1];
+        assert!(matches!(
+            prepare_content(None, None, Some(big)),
+            Err(CaptureDecision::TooLarge(_))
+        ));
+
+        // Leeres Bild-Array zählt nicht als Inhalt.
+        assert!(prepare_content(None, None, Some(Vec::new())).is_err());
     }
 
     // ----------------------------------------------------- Anzeige-Caps (Stufe 2)

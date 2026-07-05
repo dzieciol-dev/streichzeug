@@ -167,6 +167,46 @@ pub fn write_clipboard_html(html: &str, text_fallback: &str) -> Result<(), Strin
     }
 }
 
+/// Liefert den Bild-Flavor des System-Clipboards als rohe Bild-Bytes
+/// (macOS: `public.png`, Fallback `public.tiff`; Windows: BMP via
+/// `CF_BITMAP`/`CF_DIB`). Das Format dekodiert [`crate::imaging`] — hier
+/// werden nur Bytes gereicht. `None`, wenn kein Bild anliegt.
+pub fn read_clipboard_image() -> Option<Vec<u8>> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_impl::read_image()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: reine Read-Calls auf generalPasteboard (s. macos_impl-Doc).
+        unsafe { macos_impl::read_image() }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Schreibt ein geschwärztes Bild (PNG-Bytes) **plus** den geschwärzten Text
+/// in einem Zug ins Clipboard — Bild-Ziele (Word, Chats) bekommen das Bild,
+/// Text-Ziele den Text. Windows konvertiert intern nach BMP (`CF_DIB`).
+pub fn write_clipboard_image(png: &[u8], text_fallback: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_impl::write_image(png, text_fallback)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: clearContents + setData/setString — kein Aliasing.
+        unsafe { macos_impl::write_image(png, text_fallback) }
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = (png, text_fallback);
+        Err("unsupported platform".to_string())
+    }
+}
+
 // Linux/Unbekannt: kein Watcher — Detection läuft dann nur über die UI.
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod stub_impl {

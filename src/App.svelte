@@ -8,9 +8,14 @@
   separaten Diagnose-Modus wieder einbauen.
 -->
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import Onboarding from "./Onboarding.svelte";
+  import StageView from "./StageView.svelte";
+  import StashView from "./StashView.svelte";
+  import type { StageJob } from "./stage";
+  import { prettyHotkey } from "./hotkey";
 
   type Settings = {
     hotkey: string;
@@ -20,6 +25,13 @@
     retention_minutes: number;
     strict_mode: boolean;
     onboarded: boolean;
+    // Schwärz-Bühne (Vertrag 2.1)
+    stage_hotkey: string;
+    // "full" ist der Legacy-Wert früher gespeicherter Settings (läuft als "normal").
+    stage_animation: "slow" | "normal" | "fast" | "off" | "full";
+    stash_clear_on_quit: boolean;
+    show_widget: boolean;
+    widget_position: [number, number] | null;
   };
   type StorageStatus = { mapping_count: number; retention_minutes: number };
   type NerStatus = {
@@ -37,8 +49,24 @@
     enable_notifications: false,
     retention_minutes: 60,
     strict_mode: false,
-    onboarded: false
+    onboarded: false,
+    stage_hotkey: "CmdOrCtrl+Alt+Shift+B",
+    stage_animation: "normal",
+    stash_clear_on_quit: false,
+    show_widget: false,
+    widget_position: null
   };
+
+  // Leichtes View-Konzept (kein Router). Die Bühne öffnet sich event-getrieben.
+  let view: "status" | "stage" | "stash" = "status";
+  // View, zu der „Schließen" der Bühne zurückkehrt (die vor dem Event aktive).
+  let prevView: "status" | "stash" = "status";
+  let stageJob: StageJob | null = null;
+  let stageUnlisten: UnlistenFn | null = null;
+
+  function goStatus() { view = "status"; }
+  function goStash() { view = "stash"; }
+  function closeStage() { view = prevView; }
   let storageStatus: StorageStatus = { mapping_count: 0, retention_minutes: 60 };
   let purgeStatus = "";
   let initialized = false;
@@ -232,16 +260,75 @@
     }
   }
 
-  function prettyHotkey(s: string): string {
-    // "CmdOrCtrl+B" → "Strg + B" auf Win, "⌘ + B" auf Mac (best effort
-    // ohne UA-Sniffing).
-    const isMac = navigator.platform.toLowerCase().includes("mac");
-    return s
-      .replace(/CmdOrCtrl/g, isMac ? "⌘" : "Strg")
-      .replace(/Ctrl/g, "Strg")
-      .replace(/Alt/g, isMac ? "⌥" : "Alt")
-      .replace(/Shift/g, isMac ? "⇧" : "Umschalt")
-      .replace(/\+/g, " + ");
+  // --- Schwärz-Bühne: Einstellungen ---
+
+  // Kuratierte Capture-Hotkeys analog HOTKEY_OPTIONS. Default + eine
+  // konfliktärmere Alternative; leerer String = Feature aus.
+  const STAGE_HOTKEY_OPTIONS = [
+    {
+      value: "CmdOrCtrl+Alt+Shift+B",
+      label: "Strg + Alt + Shift + B  (Default)",
+      hint: "Dreifach-Modifier, in Office und Browsern nicht belegt."
+    },
+    {
+      value: "CmdOrCtrl+Alt+G",
+      label: "Strg + Alt + G  (Alternative)",
+      hint: "Kürzer zu greifen, falls die Default-Kombi hakt."
+    }
+  ];
+
+  type StageAnimation = "slow" | "normal" | "fast" | "off";
+  const STAGE_ANIMATION_OPTIONS: { value: StageAnimation; label: string; hint: string }[] = [
+    { value: "slow", label: "Langsam", hint: "Zum Zusehen und Vorführen — der Strich nimmt sich Zeit (≤ 3,5 s)." },
+    { value: "normal", label: "Normal", hint: "Der Filzstift-Strich zieht gestaffelt über jede Fundstelle (≤ 2,2 s)." },
+    { value: "fast", label: "Schnell", hint: "Gleiche Animation, gerafft (≤ 0,7 s)." },
+    { value: "off", label: "Aus", hint: "Kein Effekt — sofort das Ergebnis." }
+  ];
+
+  let stageHotkeyChangeStatus = "";
+
+  async function changeStageAnimation(value: StageAnimation) {
+    if (value === settings.stage_animation) return;
+    try {
+      await invoke("update_settings", {
+        newSettings: { ...settings, stage_animation: value }
+      });
+      settings = { ...settings, stage_animation: value };
+      saveError = "";
+    } catch (e) {
+      console.error("stage animation change failed", e);
+      settings = { ...settings };
+      saveError = `Animations-Stil konnte nicht gespeichert werden: ${e}`;
+    }
+  }
+
+  async function changeStageHotkey(value: string) {
+    if (value === settings.stage_hotkey) return;
+    stageHotkeyChangeStatus = "…";
+    try {
+      await invoke("update_settings", {
+        newSettings: { ...settings, stage_hotkey: value }
+      });
+      settings = { ...settings, stage_hotkey: value };
+      stageHotkeyChangeStatus = `Auf "${prettyHotkey(value)}" geändert — App neu starten, damit's greift.`;
+    } catch (e) {
+      stageHotkeyChangeStatus = `Fehler: ${e}`;
+    }
+  }
+
+  async function toggleStashClearOnQuit(e: Event) {
+    const checked = (e.currentTarget as HTMLInputElement).checked;
+    try {
+      await invoke("update_settings", {
+        newSettings: { ...settings, stash_clear_on_quit: checked }
+      });
+      settings = { ...settings, stash_clear_on_quit: checked };
+      saveError = "";
+    } catch (err) {
+      console.error("toggle stash_clear_on_quit failed", err);
+      settings = { ...settings };
+      saveError = `Ablage-Einstellung konnte nicht gespeichert werden: ${err}`;
+    }
   }
 
   onMount(async () => {
@@ -252,13 +339,98 @@
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden) loadAll();
     });
+    // Einziger Listener-Ort für die Bühne: Payload merken, Bühne öffnen.
+    stageUnlisten = await listen<StageJob>("stage://job", (event) => {
+      if (view !== "stage") prevView = view === "stash" ? "stash" : "status";
+      stageJob = event.payload;
+      view = "stage";
+    });
   });
+
+  onDestroy(() => {
+    if (stageUnlisten) stageUnlisten();
+  });
+
+  // --- Klick- und Drop-Einstiege in die Bühne (ohne Hotkey) -----------
+  // Button: schwärzt den aktuellen Clipboard-Inhalt (Dock-Klick → Button).
+  // Drop: markierten Text aus einer beliebigen App ins Fenster ziehen —
+  // der Text kommt im HTML5-Drop-Event mit, ganz ohne Kopieren. Dafür ist
+  // `dragDropEnabled: false` in tauri.conf.json gesetzt (Tauri würde die
+  // Drops sonst selbst abfangen und nie ans DOM durchreichen).
+  let dragDepth = 0;
+
+  async function stageFromClipboard() {
+    try {
+      await invoke("stage_clipboard");
+    } catch (e) {
+      console.error("stage_clipboard failed", e);
+    }
+  }
+
+  // Widget-Toggle wirkt sofort (Fenster wird live gezeigt/versteckt und
+  // die Wahl im Backend persistiert) — kein App-Neustart nötig. Genutzt
+  // von der Settings-Checkbox UND dem Schnell-Toggle in der Karte oben.
+  async function setWidgetVisible(visible: boolean) {
+    try {
+      await invoke("set_widget_visible", { visible });
+      settings = { ...settings, show_widget: visible };
+      saveError = "";
+    } catch (err) {
+      console.error("toggle widget failed", err);
+      settings = { ...settings };
+      saveError = `Widget-Einstellung konnte nicht übernommen werden: ${err}`;
+    }
+  }
+
+  function toggleWidget(e: Event) {
+    void setWidgetVisible((e.currentTarget as HTMLInputElement).checked);
+  }
+
+  function onDragEnter(e: DragEvent) {
+    if (e.dataTransfer?.types.includes("text/plain")) {
+      dragDepth += 1;
+    }
+  }
+
+  function onDragLeave() {
+    dragDepth = Math.max(0, dragDepth - 1);
+  }
+
+  function onDragOver(e: DragEvent) {
+    // Nötig, damit der Browser den Drop überhaupt zulässt.
+    if (e.dataTransfer?.types.includes("text/plain")) {
+      e.preventDefault();
+    }
+  }
+
+  async function onDrop(e: DragEvent) {
+    e.preventDefault();
+    dragDepth = 0;
+    const text = e.dataTransfer?.getData("text/plain") ?? "";
+    if (!text) return;
+    try {
+      await invoke("stage_text", { text });
+    } catch (err) {
+      console.error("stage_text failed", err);
+    }
+  }
 </script>
 
 {#if initialized && !settings.onboarded}
   <Onboarding initialSettings={settings} nerStatus={nerStatus} on:done={onOnboardingDone} />
 {:else}
-<main>
+<!-- svelte-ignore a11y-no-static-element-interactions -->
+<main
+  on:dragenter={onDragEnter}
+  on:dragleave={onDragLeave}
+  on:dragover={onDragOver}
+  on:drop={onDrop}
+>
+  {#if dragDepth > 0}
+    <div class="drop-overlay" aria-hidden="true">
+      <span>Loslassen zum Schwärzen</span>
+    </div>
+  {/if}
   <header>
     <h1>Streichzeug <span class="badge">Beta v{appVersion}</span></h1>
     <p class="sub">
@@ -267,11 +439,54 @@
     </p>
   </header>
 
+  <nav class="view-switch" aria-label="Ansicht">
+    <button class:active={view === "status"} on:click={goStatus}>Status</button>
+    <button class:active={view === "stash"} on:click={goStash}>Ablage</button>
+  </nav>
+
   {#if saveError}
     <div class="save-error" role="alert">
       <strong>Nicht gespeichert.</strong> {saveError}
     </div>
   {/if}
+
+  {#if view === "stage"}
+    {#if stageJob}
+      {#key stageJob.job_id}
+        <StageView
+          job={stageJob}
+          animation={settings.stage_animation}
+          on:close={closeStage}
+          on:showStash={goStash}
+        />
+      {/key}
+    {/if}
+  {:else if view === "stash"}
+    <StashView stageHotkey={settings.stage_hotkey} />
+  {:else}
+
+  <section class="card stage-entry-card">
+    <h2>Schwärzen — ohne Hotkey</h2>
+    <p class="usage">
+      Text irgendwo kopieren und hier klicken — oder markierten Text
+      einfach <strong>in dieses Fenster ziehen</strong>.
+    </p>
+    <div class="actions">
+      <button class="primary" on:click={stageFromClipboard}>
+        Zwischenablage schwärzen
+      </button>
+      <button on:click={() => setWidgetVisible(!settings.show_widget)}>
+        {settings.show_widget ? "Widget ausblenden" : "Widget einblenden"}
+      </button>
+    </div>
+    <p class="hint">
+      Das Ergebnis landet geschwärzt in der Zwischenablage und in der
+      Ablage. Schneller geht's mit dem Hotkey
+      <kbd>{prettyHotkey(settings.stage_hotkey)}</kbd> direkt auf einer
+      Markierung — oder per Klick aufs schwebende Widget
+      (Rechtsklick darauf: ausblenden).
+    </p>
+  </section>
 
   <section class="card">
     <h2>So nutzt du die App</h2>
@@ -381,6 +596,97 @@
     </label>
   </section>
 
+  <section class="card stage-settings-card">
+    <h2>Schwärz-Bühne</h2>
+    <p class="usage">
+      Zweiter Workflow: Text in einer beliebigen App markieren, Capture-Hotkey
+      drücken — die Fundstellen werden sichtbar geschwärzt und landen als
+      Eintrag in der <button class="link-btn" on:click={goStash}>Ablage</button>
+      sowie in der Zwischenablage.
+    </p>
+
+    <div class="sub-block">
+      <strong>Animations-Stil</strong>
+      {#each STAGE_ANIMATION_OPTIONS as opt}
+        <label class="hotkey-opt">
+          <input
+            type="radio"
+            name="stage-animation"
+            value={opt.value}
+            checked={settings.stage_animation === opt.value ||
+              (settings.stage_animation === "full" && opt.value === "normal")}
+            on:change={() => changeStageAnimation(opt.value)}
+          />
+          <span>
+            <strong>{opt.label}</strong>
+            <br />
+            <span class="hint-inline">{opt.hint}</span>
+          </span>
+        </label>
+      {/each}
+    </div>
+
+    <div class="sub-block">
+      <strong>Capture-Hotkey</strong>
+      {#each STAGE_HOTKEY_OPTIONS as opt}
+        <label class="hotkey-opt">
+          <input
+            type="radio"
+            name="stage-hotkey"
+            value={opt.value}
+            checked={settings.stage_hotkey === opt.value}
+            on:change={() => changeStageHotkey(opt.value)}
+          />
+          <span>
+            <strong>{opt.label}</strong>
+            <br />
+            <span class="hint-inline">{opt.hint}</span>
+          </span>
+        </label>
+      {/each}
+      {#if stageHotkeyChangeStatus}
+        <p class="hint" style="margin-top: 8px;">{stageHotkeyChangeStatus}</p>
+      {:else}
+        <p class="hint">Nach dem Wechsel ist ein App-Neustart nötig.</p>
+      {/if}
+    </div>
+
+    <label class="opt-row">
+      <input
+        type="checkbox"
+        checked={settings.stash_clear_on_quit}
+        on:change={toggleStashClearOnQuit}
+      />
+      <span>
+        <strong>Ablage beim Beenden leeren</strong>
+        <br />
+        <span class="hint-inline">
+          Session-only-Ablage: alle geschwärzten Einträge werden beim
+          App-Quit gelöscht.
+        </span>
+      </span>
+    </label>
+
+    <label class="opt-row">
+      <input
+        type="checkbox"
+        checked={settings.show_widget}
+        on:change={toggleWidget}
+      />
+      <span>
+        <strong>Schwebendes Widget anzeigen</strong> <span class="hint-inline">(nur macOS)</span>
+        <br />
+        <span class="hint-inline">
+          Ein kleiner Marker-Button, der über allen Fenstern schwebt und
+          per Verschiebe-Griff frei platzierbar ist. Text in einer App
+          markieren, Widget anklicken → die Markierung wird geschwärzt.
+          Der Klick nimmt der App den Fokus nicht weg. Wirkt sofort, kein
+          Neustart nötig.
+        </span>
+      </span>
+    </label>
+  </section>
+
   <section class="card">
     <h2>Status</h2>
     <div class="status-row">
@@ -485,6 +791,8 @@
     </p>
   </section>
 
+  {/if}
+
   <footer>
     <p>
       Open Source unter MIT OR Apache-2.0. Bug-Reports und Feature-Requests:
@@ -499,6 +807,15 @@
   header h1 { margin: 0 0 4px; font-size: 22px; }
   .badge { font-size: 11px; padding: 2px 6px; background: #eff6ff; color: #1d4ed8; border: 1px solid #bfdbfe; border-radius: 4px; vertical-align: middle; margin-left: 6px; }
   .sub { color: #6b7280; margin: 0 0 24px; }
+  .view-switch { display: flex; gap: 6px; margin: 0 0 20px; }
+  .view-switch button { font: inherit; padding: 6px 16px; border-radius: 6px; border: 1px solid #d1d5db; background: #f9fafb; cursor: pointer; font-size: 13px; }
+  .view-switch button:hover { background: #f3f4f6; }
+  .view-switch button.active { background: #2563eb; color: white; border-color: #2563eb; }
+  .stage-settings-card { border-left: 3px solid #2563eb; }
+  .sub-block { margin: 14px 0 0; }
+  .sub-block > strong { font-size: 13px; }
+  .link-btn { font: inherit; background: none; border: none; padding: 0; color: #2563eb; text-decoration: underline; cursor: pointer; }
+  .link-btn:hover { background: none; color: #1d4ed8; }
   .save-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.4; }
   .card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 16px; }
@@ -507,6 +824,29 @@
   .hint { color: #6b7280; font-size: 12px; margin: 8px 0 0; padding-top: 8px; border-top: 1px solid #f3f4f6; }
   kbd { background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 6px; border-radius: 3px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .mode-card { border-left: 3px solid #2563eb; }
+  .stage-entry-card { border-left: 3px solid #171717; }
+  /* Vollflächiges Overlay während eines Text-Drags über dem Fenster.
+     pointer-events: none, damit es die dragleave/drop-Events des <main>
+     nicht selbst schluckt. */
+  .drop-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(23, 23, 23, 0.55);
+    pointer-events: none;
+  }
+  .drop-overlay span {
+    background: #171717;
+    color: #fff;
+    font-size: 16px;
+    font-weight: 600;
+    padding: 12px 22px;
+    border-radius: 8px;
+    transform: rotate(-0.5deg);
+  }
   .opt-row { display: flex; gap: 10px; padding: 8px 10px; margin: 8px 0 0; border-radius: 6px; border: 1px solid #e5e7eb; cursor: pointer; align-items: flex-start; font-size: 13px; }
   .opt-row input { margin-top: 4px; }
   .hotkey-opt { display: flex; gap: 10px; padding: 8px 10px; margin: 4px 0; border-radius: 6px; border: 1px solid #e5e7eb; cursor: pointer; align-items: flex-start; font-size: 13px; }

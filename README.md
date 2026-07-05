@@ -28,6 +28,18 @@
 Die App läuft als Tray-Icon im Hintergrund, der globale Hotkey funktioniert
 in **jeder** Anwendung.
 
+### Zweiter Workflow: Schwärz-Bühne
+
+Für „erst schwärzen, später verwenden": Text in einer beliebigen App
+**markieren** und **Strg+Alt+Shift+B** drücken. Streichzeug holt die
+Markierung, bringt das eigene Fenster nach vorn und schwärzt die
+Fundstellen sichtbar vor deinen Augen (Marker-Animation). Das Ergebnis
+liegt sofort im Clipboard **und** in der **Ablage** der App — dort
+gespeichert wird ausschließlich die geschwärzte Fassung, nie der
+Originaltext. Ohne Markierung nimmt die Bühne den aktuellen
+Clipboard-Inhalt (erst kopieren, dann Hotkey — nützlich z. B. in
+Terminals, wo Strg+C anders belegt ist).
+
 ---
 
 ## Was erkannt wird

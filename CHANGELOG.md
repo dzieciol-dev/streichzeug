@@ -6,6 +6,45 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
+**Neu — Schwärz-Bühne (zweiter Workflow):**
+
+- **Markieren → `Strg+Alt+Shift+B` → live zusehen.** Text in einer beliebigen
+  App markieren und den neuen Capture-Hotkey drücken: Streichzeug holt die
+  Markierung (synthetisches Strg+C), bringt das eigene Fenster nach vorn und
+  schwärzt die Fundstellen sichtbar mit einer Marker-Strich-Animation
+  (vier Stufen: Langsam / Normal / Schnell / Aus, respektiert
+  `prefers-reduced-motion`). Das geschwärzte Ergebnis liegt sofort im
+  Clipboard.
+- **Ablage.** Jeder Capture mit Funden landet zusätzlich als Eintrag in einer
+  Ablage in der App (Titel, Datum, Chips pro Datenart, „Kopieren"/„Löschen").
+  Gespeichert wird ausschließlich die geschwärzte Fassung — nie Originaltext,
+  dadurch auch im Strict-Mode unbedenklich. Optional: „Ablage beim Beenden
+  leeren".
+- Fallback ohne Markierung: enthält das Clipboard bereits Text („erst normal
+  kopieren, dann Hotkey"), wird der verwendet. Der bestehende
+  Smart-Paste-Hotkey ist unverändert; der Capture-Hotkey ist in den
+  Einstellungen wählbar und kollisionsgeschützt (im Zweifel deaktiviert er
+  sich selbst, nie den Smart-Paste-Pfad).
+- **Drei Einstiege ohne Hotkey:** Button „Zwischenablage schwärzen" im
+  Fenster (Dock-Klick → Button), markierten Text per **Drag & Drop direkt
+  ins Fenster ziehen** (ganz ohne Kopieren), und derselbe Eintrag im
+  Tray-Menü.
+- **Schwebendes Widget (macOS, opt-in):** ein kleiner Marker-Button, der
+  über allen Fenstern und Spaces schwebt. Text markieren → Widget
+  anklicken → Markierung wird geschwärzt. Das Widget ist ein
+  **nicht-aktivierendes NSPanel** — der Klick nimmt der Arbeits-App den
+  Fokus nicht weg, deshalb bleibt die Markierung abholbar (Mechanik dem
+  Apache-2.0-Plugin `tauri-nspanel` nachempfunden, ohne es einzubinden).
+  Frei verschiebbar (Griff oben, Position wird gemerkt), Ein/Aus in den
+  Einstellungen ohne Neustart.
+- Robustes Markierung-Abholen: vor dem synthetischen Strg+C wartet die App
+  auf das physische Loslassen der Hotkey-Tasten (macOS-Hardware-Check) und
+  versucht den Copy bis zu dreimal — noch gedrückte Modifier hatten das
+  injizierte Cmd+C sonst zu `Cmd+Option+Shift+C` gemacht.
+- Fix nebenbei: `src/main.ts` nutzte noch die Svelte-4-Mount-API
+  (`new App(...)`), die unter Svelte 5 zur Laufzeit wirft — auf `mount()`
+  umgestellt.
+
 **Sicherheit / Härtung:**
 
 - **Mapping-DB mit SQLCipher (AES-256) verschlüsselt.** Der Schlüssel wird

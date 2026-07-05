@@ -14,25 +14,42 @@
   let step = 0;
 
   const isMac = navigator.platform.toLowerCase().includes("mac");
-  const STEPS_TOTAL = isMac ? 7 : 6;
+  const STEPS_TOTAL = isMac ? 8 : 7;
 
   let downloadStatus = nerStatus.model_files_present ? "done" : "idle";
   let downloadError = "";
+  let widgetError = "";
 
   function next() {
-    if (step === 2 && draft.strict_mode) {
-      step = 4;
+    if (step === 3 && draft.strict_mode) {
+      step = 5;
       return;
     }
     step += 1;
   }
 
   function back() {
-    if (step === 4 && draft.strict_mode) {
-      step = 2;
+    if (step === 5 && draft.strict_mode) {
+      step = 3;
       return;
     }
     step = Math.max(0, step - 1);
+  }
+
+  // Widget-Opt-in wirkt sofort: das (versteckte) Panel wird live gezeigt,
+  // damit der User es beim Aktivieren direkt schweben sieht. Der Command
+  // persistiert show_widget selbst; draft wird gespiegelt, damit finish()
+  // die Wahl beim Speichern des Drafts nicht wieder überschreibt.
+  async function toggleWidget(e: Event) {
+    const visible = (e.currentTarget as HTMLInputElement).checked;
+    try {
+      await invoke("set_widget_visible", { visible });
+      draft.show_widget = visible;
+      widgetError = "";
+    } catch (err) {
+      draft.show_widget = false;
+      widgetError = String(err);
+    }
   }
 
   async function startDownload() {
@@ -106,6 +123,38 @@
       </label>
     </div>
   {:else if step === 2}
+    <h1>Schwärzen mit Vorschau: die Bühne</h1>
+    <p>
+      Der zweite Workflow: Text in einer beliebigen App <strong>markieren</strong>
+      und <kbd>{isMac ? "Cmd + Option + Shift + B" : "Strg + Alt + Umschalt + B"}</kbd>
+      drücken — Streichzeug holt die Markierung, schwärzt sie live vor deinen
+      Augen und legt das Ergebnis in der <strong>Ablage</strong> ab, fertig zum
+      Kopieren.
+    </p>
+    <p class="hint">
+      Ohne Hotkey geht's auch: markierten Text einfach ins Streichzeug-Fenster
+      ziehen oder dort auf „Zwischenablage schwärzen" klicken.
+    </p>
+    {#if isMac}
+      <div class="options">
+        <label class="option" class:selected={draft.show_widget}>
+          <input type="checkbox" checked={draft.show_widget} on:change={toggleWidget} />
+          <div>
+            <span class="opt-label">Schwebendes Widget einblenden</span>
+            <p class="opt-hint">
+              Ein kleiner Knopf, der über allen Fenstern schwebt: Text markieren,
+              Widget anklicken, geschwärzt. Lässt sich frei verschieben und per
+              Rechtsklick wieder ausblenden — auch später in den Einstellungen
+              umschaltbar.
+            </p>
+          </div>
+        </label>
+      </div>
+      {#if widgetError}
+        <p class="warning">Widget konnte nicht aktiviert werden: {widgetError}</p>
+      {/if}
+    {/if}
+  {:else if step === 3}
     <h1>Verarbeitungsmodus</h1>
     <p>Zwei Wege im Umgang mit personenbezogenen Daten:</p>
     <div class="options">
@@ -142,7 +191,7 @@
         </div>
       </label>
     </div>
-  {:else if step === 3}
+  {:else if step === 4}
     <h1>Aufbewahrungsdauer</h1>
     <p>
       Wie lange sollen Pseudonym-Mappings lokal gespeichert werden? Nach
@@ -170,7 +219,7 @@
         <div><span class="opt-label">Nur diese Session</span><p class="opt-hint">Mappings nach App-Quit weg, Tokens beim LLM danach anonym.</p></div>
       </label>
     </div>
-  {:else if step === 4}
+  {:else if step === 5}
     <h1>Erweiterte Erkennung (NER)</h1>
     <p>
       Optional: ein lokales KI-Modell für statistische Erkennung von
@@ -205,12 +254,13 @@
       <button class="primary" on:click={startDownload}>Modell jetzt laden (145 MB)</button>
       <p class="hint">Oder überspringen — später aus dem App-Fenster aktivierbar.</p>
     {/if}
-  {:else if step === 5 && isMac}
+  {:else if step === 6 && isMac}
     <h1>macOS-Berechtigung erforderlich</h1>
     <p>
       Beim ersten Hotkey-Druck fragt macOS nach Eingabehilfen-Permission.
-      Diese braucht Streichzeug, um das synthetische Cmd+V an die Ziel-App
-      zu schicken.
+      Diese braucht Streichzeug, um synthetische Tastendrücke an die Ziel-App
+      zu schicken: Cmd+V beim Einfügen, Cmd+C beim Holen der Markierung für
+      die Bühne.
     </p>
     <p>
       Erscheint der Dialog: Systemeinstellungen öffnen, in der Liste
@@ -273,6 +323,7 @@
   h1 { font-size: 22px; margin: 0 0 12px; }
   h3 { font-size: 14px; margin: 16px 0 6px; color: #555; }
   p { line-height: 1.5; color: #444; }
+  kbd { background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 6px; border-radius: 3px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   p.hint { font-size: 13px; color: #777; }
   p.success { color: #2563eb; font-weight: 600; }
   p.warning { background: #fff8e1; border-left: 3px solid #f59e0b; padding: 8px 12px; border-radius: 3px; }

@@ -60,7 +60,7 @@ jobs:
       # Resources mehr (siehe Public-Repo Release-Notes), daher braucht
       # die CI keine Placeholder-Files.
       - name: Build app (with NER feature)
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

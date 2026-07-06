@@ -1024,12 +1024,32 @@ mod downloader {
             let mut tar = tar::Archive::new(gz);
             for entry in tar.entries()? {
                 let mut entry = entry?;
-                let path = entry.path()?.into_owned();
-                if path.file_name().and_then(|n| n.to_str()) == Some(ort_lib_name()) {
-                    entry.unpack(target)?;
-                    log::info!("ner download: extracted {}", target.display());
-                    return Ok(());
+                // NUR reguläre Dateien: Im ORT-Archiv ist der unversionierte
+                // Name (libonnxruntime.dylib) ein SYMLINK auf die versionierte
+                // Datei (libonnxruntime.1.22.0.dylib). Das frühere
+                // entry.unpack() des Symlink-Eintrags erzeugte einen TOTEN
+                // Link — der Manifest-Hash scheiterte dann mit ENOENT
+                // (Beta-Befund 2026-07-06). Deshalb: den versionierten
+                // Datei-Eintrag inhaltlich unter dem Zielnamen ablegen.
+                if entry.header().entry_type() != tar::EntryType::Regular {
+                    continue;
                 }
+                let path = entry.path()?.into_owned();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !is_ort_lib_file(name) {
+                    continue;
+                }
+                // Etwaigen Alt-Zustand (toter Symlink aus früheren Downloads)
+                // wegräumen — File::create würde sonst DURCH den Link schreiben.
+                let _ = std::fs::remove_file(target);
+                let mut out = std::fs::File::create(target)
+                    .with_context(|| format!("create target {}", target.display()))?;
+                std::io::copy(&mut entry, &mut out)
+                    .with_context(|| format!("extract {name} → {}", target.display()))?;
+                log::info!("ner download: extracted {} (aus {name})", target.display());
+                return Ok(());
             }
             anyhow::bail!("ORT-Shared-Library nicht in Archive gefunden");
         }
@@ -1070,6 +1090,20 @@ mod downloader {
         {
             anyhow::bail!("Plattform nicht unterstützt für ORT-Auto-Extract")
         }
+    }
+
+    /// Matcht die ORT-Hauptbibliothek — unversioniert („libonnxruntime.dylib")
+    /// wie versioniert („libonnxruntime.1.22.0.dylib", „libonnxruntime.so.1.22.0").
+    /// Der Punkt nach dem Stamm grenzt gegen Nachbar-Libs wie
+    /// „libonnxruntime_providers_shared.so" ab.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn is_ort_lib_file(name: &str) -> bool {
+        if name == ort_lib_name() {
+            return true;
+        }
+        name.strip_prefix("libonnxruntime")
+            .map(|rest| rest.starts_with('.') && (rest.ends_with(".dylib") || rest.contains(".so")))
+            .unwrap_or(false)
     }
 
     fn write_manifest(dir: &std::path::Path) -> Result<()> {

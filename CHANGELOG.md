@@ -6,6 +6,12 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
+_(noch nichts)_
+
+---
+
+## 0.6.1 — Erweiterte Erkennung repariert, App-Tabs, Paste-Feld (2026-07-06)
+
 **Erweiterte Erkennung (NER) repariert + App-Tabs:**
 
 - **Der NER-Schalter wirkt jetzt wirklich.** Vorher: Der Tray-Haken flippte

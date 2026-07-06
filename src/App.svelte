@@ -414,6 +414,39 @@
     }
   }
 
+  // Paste-Feld: nimmt Text ODER Bild (Screenshot) aus dem Paste-Event
+  // entgegen und schickt es direkt an die Bühne. preventDefault sorgt
+  // dafür, dass NIE Original-Inhalt im Feld (DOM) landet.
+  async function onPasteField(e: ClipboardEvent) {
+    e.preventDefault();
+    const dt = e.clipboardData;
+    if (!dt) return;
+
+    const imageItem = Array.from(dt.items ?? []).find(
+      (i) => i.kind === "file" && i.type.startsWith("image/")
+    );
+    if (imageItem) {
+      const file = imageItem.getAsFile();
+      if (file) {
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          await invoke("stage_image", bytes);
+        } catch (err) {
+          console.error("stage_image (paste) failed", err);
+        }
+        return;
+      }
+    }
+
+    const text = dt.getData("text/plain");
+    if (!text) return;
+    try {
+      await invoke("stage_text", { text });
+    } catch (err) {
+      console.error("stage_text (paste) failed", err);
+    }
+  }
+
   // Widget-Toggle wirkt sofort (Fenster wird live gezeigt/versteckt und
   // die Wahl im Backend persistiert) — kein App-Neustart nötig. Genutzt
   // von der Settings-Checkbox UND dem Schnell-Toggle in der Karte oben.
@@ -949,9 +982,18 @@
 
   <section class="card stage-entry-card">
     <h2>Schwärzen — ohne Hotkey</h2>
+    <!-- Paste-Ziel: Das Feld ZEIGT den Inhalt nie an (preventDefault beim
+         Paste) — der Text/Screenshot geht direkt an die Bühne, es bleibt
+         kein Original im DOM stehen. -->
+    <textarea
+      class="paste-field"
+      rows="2"
+      placeholder="Hier klicken und einfügen (⌘V) — Text oder Screenshot wird sofort geschwärzt"
+      on:paste={onPasteField}
+    ></textarea>
     <p class="usage">
-      Text irgendwo kopieren und hier klicken — oder markierten Text
-      einfach <strong>in dieses Fenster ziehen</strong>.
+      Alternativ: Text irgendwo kopieren und unten klicken — oder markierten
+      Text bzw. ein Bild einfach <strong>in dieses Fenster ziehen</strong>.
     </p>
     <div class="actions">
       <button class="primary" on:click={stageFromClipboard}>
@@ -1019,6 +1061,21 @@
   kbd { background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 6px; border-radius: 3px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .mode-card { border-left: 3px solid #2563eb; }
   .stage-entry-card { border-left: 3px solid #171717; }
+  .paste-field {
+    width: 100%;
+    box-sizing: border-box;
+    resize: none;
+    font: inherit;
+    font-size: 13px;
+    color: #6b7280;
+    background: #fafafa;
+    border: 1.5px dashed #d1d5db;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    caret-color: transparent; /* es wird nie Text angezeigt */
+  }
+  .paste-field:focus { outline: none; border-color: #2563eb; background: #eff6ff; }
   /* Vollflächiges Overlay während eines Text-Drags über dem Fenster.
      pointer-events: none, damit es die dragleave/drop-Events des <main>
      nicht selbst schluckt. */

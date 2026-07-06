@@ -515,7 +515,7 @@ mod inference {
     }
 
     pub(super) fn classify(text: &str) -> Vec<NerFinding> {
-        with_engine(|engine| match run_inference(engine, text) {
+        with_engine(|engine| match run_inference_chunked(engine, text) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("ner: inference failed: {e:#}");
@@ -523,6 +523,71 @@ mod inference {
             }
         })
         .unwrap_or_default()
+    }
+
+    /// Positions-Limit des DistilBERT-Modells (Positional Embeddings).
+    /// Längere Eingaben MÜSSEN gefenstert werden — vorher scheiterte die
+    /// Inferenz an >512 Tokens KOMPLETT (ORT-Broadcast-Fehler „512 by 725")
+    /// und NER lieferte für normale lange Mails still gar nichts
+    /// (Beta-Befund 2026-07-06).
+    const MAX_MODEL_TOKENS: usize = 512;
+    /// Nutz-Tokens pro Fenster — Puffer für [CLS]/[SEP]-Sondertokens, die
+    /// `encode(text, true)` in [`run_inference`] zusätzlich anfügt.
+    const CHUNK_TOKENS: usize = 480;
+    /// Überlappung zwischen Fenstern, damit Entities an Schnittkanten
+    /// nicht halbiert werden.
+    const CHUNK_OVERLAP_TOKENS: usize = 48;
+
+    /// Fenstert lange Texte auf Modell-taugliche Stücke und führt die
+    /// Findings (Byte-Offsets zurückverschoben) zusammen. Kurze Texte gehen
+    /// direkt durch. Identische Doppel-Findings aus der Überlappung werden
+    /// hier dedupliziert; teilweise überlappende entschärft downstream
+    /// `detection::dedupe_and_sort` (längerer Span gewinnt).
+    fn run_inference_chunked(eng: &NerEngine, text: &str) -> anyhow::Result<Vec<NerFinding>> {
+        // Encoding OHNE Sondertokens — nur für die Schnittpunkte (die
+        // Offsets sind Byte-Offsets an Token-Grenzen, also Char-sicher).
+        let encoding = eng
+            .tokenizer
+            .encode(text, false)
+            .map_err(|e| anyhow::anyhow!("encode (chunking): {e}"))?;
+        let offsets = encoding.get_offsets();
+        if offsets.len() + 2 <= MAX_MODEL_TOKENS {
+            return run_inference(eng, text);
+        }
+        log::info!(
+            "ner: Text hat {} Tokens — fenstere in {}er-Stücke (Überlappung {})",
+            offsets.len(),
+            CHUNK_TOKENS,
+            CHUNK_OVERLAP_TOKENS
+        );
+
+        let mut findings: Vec<NerFinding> = Vec::new();
+        let mut start_tok = 0usize;
+        loop {
+            let end_tok = (start_tok + CHUNK_TOKENS).min(offsets.len());
+            let byte_start = offsets[start_tok].0;
+            let byte_end = if end_tok == offsets.len() {
+                text.len()
+            } else {
+                offsets[end_tok].0
+            };
+            let chunk = &text[byte_start..byte_end];
+            for mut f in run_inference(eng, chunk)? {
+                f.start += byte_start;
+                f.end += byte_start;
+                let duplicate = findings.iter().any(|g| {
+                    g.start == f.start && g.end == f.end && g.entity_type == f.entity_type
+                });
+                if !duplicate {
+                    findings.push(f);
+                }
+            }
+            if end_tok == offsets.len() {
+                break;
+            }
+            start_tok = end_tok.saturating_sub(CHUNK_OVERLAP_TOKENS);
+        }
+        Ok(findings)
     }
 
     fn run_inference(eng: &NerEngine, text: &str) -> anyhow::Result<Vec<NerFinding>> {
@@ -1124,5 +1189,80 @@ mod downloader {
         let mut file = std::fs::File::create(dir.join("MANIFEST.sha256"))?;
         file.write_all(content.as_bytes())?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "ner"))]
+mod diagnose_tests {
+    /// Diagnose gegen die ECHTE Engine (braucht heruntergeladene Modell-
+    /// Dateien im User-Datenverzeichnis) — bewusst `#[ignore]`:
+    /// `cargo test --features ner -- --ignored diagnose --nocapture`
+    #[test]
+    #[ignore]
+    fn diagnose_salutation_names() {
+        super::set_enabled(true);
+        let ready = super::ensure_loaded();
+        println!("engine ready: {ready}");
+        for text in [
+            "Lieber Herr Dr. Demary,",
+            "lieber Herr Dr. Obst,",
+            "Volker Demary und Andreas Obst treffen sich in Dortmund.",
+            // Länge/Struktur wie eine echte Mail — reproduziert den
+            // Beta-Befund, dass NER im langen Text nichts liefert.
+            "Betreff: NPL-Grundlagenstudie: Literatur und BKS-Plattform\n\nLieber Herr Dr. Demary,\nlieber Herr Dr. Obst,\n\nvielen Dank!",
+            // Gleicher Text OHNE Umlaute/Sonderzeichen zur Abgrenzung.
+            "Betreff: Studie\n\nLieber Herr Dr. Demary,\nlieber Herr Dr. Obst,\n\nvielen Dank!",
+        ] {
+            let findings = super::classify(text);
+            println!("{text:?} -> {findings:?}");
+        }
+    }
+
+    /// Lange Mail (>512 Tokens) — vorher scheiterte die Inferenz komplett
+    /// (ORT-Broadcast „512 by 725") und NER lieferte still nichts.
+    #[test]
+    #[ignore]
+    fn diagnose_long_text_chunking() {
+        super::set_enabled(true);
+        assert!(super::ensure_loaded());
+        // Füller erzeugt >512 Tokens; die Namen stehen am Anfang UND am
+        // Ende — beide müssen durchs Fenster-Chunking gefunden werden.
+        let filler = "Die Plattform aggregiert Literatur zu notleidenden Krediten und stellt Volltexte bereit. ".repeat(40);
+        let text = format!(
+            "Lieber Herr Dr. Demary,\n\n{filler}\nMit freundlichen Grüßen\nVolker Demary und Andreas Obst"
+        );
+        let findings = super::classify(&text);
+        println!("findings: {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.text.contains("Demary") && f.start < 30),
+            "Name am ANFANG des langen Texts fehlt"
+        );
+        assert!(
+            findings.iter().any(|f| f.text.contains("Obst") && f.start > 1000),
+            "Name am ENDE des langen Texts fehlt"
+        );
+    }
+
+    /// Voller detect()-Durchlauf über einen realistischen Mail-Anfang mit
+    /// Umlauten VOR den Namen — prüft, ob NER-Findings die Pipeline
+    /// (Offset-Mapping, Dedupe) überleben.
+    #[test]
+    #[ignore]
+    fn diagnose_full_detect_email() {
+        super::set_enabled(true);
+        assert!(super::ensure_loaded());
+        let text = "Betreff: NPL-Grundlagenstudie: Literatur und BKS-Plattform\n\nLieber Herr Dr. Demary,\nlieber Herr Dr. Obst,\n\nvielen Dank für die Rückmeldung — schöne Grüße aus München.";
+        let findings = crate::detection::detect(text);
+        for f in &findings {
+            println!("{}..{} {} {:?} conf={}", f.start, f.end, f.entity_type, f.original, f.confidence);
+        }
+        assert!(
+            findings.iter().any(|f| f.original == "Demary"),
+            "Demary fehlt im Gesamtergebnis"
+        );
+        assert!(
+            findings.iter().any(|f| f.original.contains("Obst")),
+            "Obst fehlt im Gesamtergebnis"
+        );
     }
 }

@@ -181,6 +181,19 @@ fn manifest_lists_native_lib(manifest_path: &std::path::Path) -> bool {
 /// Macht das Verzeichnis auf Abruf hin sichtbar — der Caller kann's für
 /// User-Feedback nutzen („Modell wird nach … geladen").
 pub fn user_models_dir() -> Option<std::path::PathBuf> {
+    // Test-Builds: NIE das echte Modell-Verzeichnis anfassen — sobald die
+    // echten Dateien vorliegen, würde jeder Test-Lauf die ORT-Bibliothek
+    // laden, und deren C++-Statics reißen den Testprozess beim Teardown
+    // mit SIGABRT („mutex lock failed") ab. Tests laufen deshalb gegen ein
+    // leeres Verzeichnis; die ignored-Diagnose-Tests zeigen explizit per
+    // STREICHZEUG_TEST_MODELS_DIR auf die echten Dateien (und akzeptieren
+    // dafür den unsauberen Prozess-Exit ihres Einzel-Laufs).
+    if cfg!(test) {
+        if let Ok(dir) = std::env::var("STREICHZEUG_TEST_MODELS_DIR") {
+            return Some(std::path::PathBuf::from(dir));
+        }
+        return Some(std::env::temp_dir().join("streichzeug-test-models-leer"));
+    }
     dirs::data_local_dir().map(|d| d.join("de.streichzeug.app").join("models"))
 }
 
@@ -482,6 +495,19 @@ mod inference {
     ///
     /// Erster Treffer mit existierender `model.onnx` gewinnt.
     fn models_dir() -> anyhow::Result<PathBuf> {
+        // Test-Builds: NIE die echten Modell-Dateien laden — die ORT-C++-
+        // Statics reißen den Testprozess beim Teardown mit SIGABRT ab
+        // („mutex lock failed"). Nur die ignored-Diagnose-Tests zeigen
+        // explizit per Env-Var auf die echten Dateien.
+        if cfg!(test) {
+            return match std::env::var("STREICHZEUG_TEST_MODELS_DIR") {
+                Ok(dir) => Ok(PathBuf::from(dir)),
+                Err(_) => anyhow::bail!(
+                    "Test-Build: Modell-Laden ist deaktiviert (STREICHZEUG_TEST_MODELS_DIR nicht gesetzt)"
+                ),
+            };
+        }
+
         let exe = std::env::current_exe()?;
         let exe_dir = exe
             .parent()
@@ -1197,9 +1223,20 @@ mod diagnose_tests {
     /// Diagnose gegen die ECHTE Engine (braucht heruntergeladene Modell-
     /// Dateien im User-Datenverzeichnis) — bewusst `#[ignore]`:
     /// `cargo test --features ner -- --ignored diagnose --nocapture`
+    /// Zeigt den Test-Prozess auf die ECHTEN Modell-Dateien (Tests laufen
+    /// sonst bewusst gegen ein leeres Verzeichnis, s. user_models_dir).
+    fn point_at_real_models() {
+        let real = dirs::data_local_dir()
+            .expect("data dir")
+            .join("de.streichzeug.app")
+            .join("models");
+        std::env::set_var("STREICHZEUG_TEST_MODELS_DIR", &real);
+    }
+
     #[test]
     #[ignore]
     fn diagnose_salutation_names() {
+        point_at_real_models();
         super::set_enabled(true);
         let ready = super::ensure_loaded();
         println!("engine ready: {ready}");
@@ -1223,6 +1260,7 @@ mod diagnose_tests {
     #[test]
     #[ignore]
     fn diagnose_long_text_chunking() {
+        point_at_real_models();
         super::set_enabled(true);
         assert!(super::ensure_loaded());
         // Füller erzeugt >512 Tokens; die Namen stehen am Anfang UND am
@@ -1249,6 +1287,7 @@ mod diagnose_tests {
     #[test]
     #[ignore]
     fn diagnose_full_detect_email() {
+        point_at_real_models();
         super::set_enabled(true);
         assert!(super::ensure_loaded());
         let text = "Betreff: NPL-Grundlagenstudie: Literatur und BKS-Plattform\n\nLieber Herr Dr. Demary,\nlieber Herr Dr. Obst,\n\nvielen Dank für die Rückmeldung — schöne Grüße aus München.";

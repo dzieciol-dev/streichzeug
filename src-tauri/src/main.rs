@@ -136,6 +136,31 @@ fn copy_log_to_clipboard() -> Result<usize, String> {
 ///   ORT-Library findet, Init durchgelaufen)
 #[tauri::command]
 fn get_ner_status() -> serde_json::Value {
+    ner_status_json()
+}
+
+/// Frontend-Command: Erweiterte Erkennung an-/abschalten. Persistiert das
+/// Setting, zieht das Laufzeit-Gate nach und lädt die Engine bei Bedarf
+/// SOFORT — kein Neustart nötig (der Tray-Toggle, der nur das Setting
+/// flippte und einen Neustart verlangte, ist ersatzlos entfallen).
+/// `async`, damit der blockierende Engine-Load (~300 ms + ORT-Init) nicht
+/// auf dem Main-Thread läuft. Liefert den frischen NER-Status.
+#[tauri::command]
+async fn set_ner_enabled(enabled: bool) -> Result<serde_json::Value, String> {
+    let mut s = Settings::load();
+    s.enable_ner = enabled;
+    s.save().map_err(|e| e.to_string())?;
+    ner::set_enabled(enabled);
+    if enabled {
+        let ready = ner::ensure_loaded();
+        log::info!("ner: über die App aktiviert, engine_ready={ready}");
+    } else {
+        log::info!("ner: über die App deaktiviert (wirkt sofort)");
+    }
+    Ok(ner_status_json())
+}
+
+fn ner_status_json() -> serde_json::Value {
     let built = cfg!(feature = "ner");
     let cfg = Settings::load();
     let ready = ner::is_ready();
@@ -165,7 +190,11 @@ async fn download_ner_model() -> Result<String, String> {
 /// den User darauf hinzuweisen.
 #[tauri::command]
 fn update_settings(new_settings: Settings) -> Result<(), String> {
-    new_settings.save().map_err(|e| e.to_string())
+    new_settings.save().map_err(|e| e.to_string())?;
+    // Laufzeit-Gate der NER-Schicht mitziehen — Settings-Änderungen (auch
+    // aus dem Onboarding) wirken damit sofort, ohne Neustart.
+    ner::set_enabled(new_settings.enable_ner);
+    Ok(())
 }
 
 /// Frontend-Command: Anzahl der aktuell gespeicherten Mappings + Retention.
@@ -390,10 +419,13 @@ fn main() {
         env!("CARGO_PKG_VERSION"),
         cfg.hotkey, cfg.auto_detection, cfg.enable_ner, cfg.retention_minutes, cfg.strict_mode
     );
+    // Laufzeit-Gate der NER-Schicht aus dem Setting spiegeln — classify()
+    // prüft das Gate pro Aufruf (kein Datei-I/O im Hot-Path).
+    ner::set_enabled(cfg.enable_ner);
     if cfg.enable_ner {
         // Eager-Init beim Start, damit der erste Hotkey-Druck nicht
         // die Modell-Lade-Latenz absorbieren muss (~300 ms typisch).
-        let ready = ner::is_ready();
+        let ready = ner::ensure_loaded();
         log::info!("ner: enable_ner=true, engine_ready={ready}");
     }
 
@@ -469,6 +501,7 @@ fn main() {
             get_settings,
             update_settings,
             get_ner_status,
+            set_ner_enabled,
             download_ner_model,
             open_log_folder,
             copy_log_to_clipboard,
@@ -537,21 +570,9 @@ fn main() {
                 cfg.auto_detection,
                 None::<&str>,
             )?;
-            // L3-NER-Toggle. Label hängt davon ab, ob das Feature gebaut
-            // wurde — andernfalls wäre ein aktivierbarer Eintrag irreführend.
-            let ner_label = if cfg!(feature = "ner") {
-                "Erweiterte Erkennung (lokales KI-Modell, Restart nötig)"
-            } else {
-                "Erweiterte Erkennung — Build ohne --features ner"
-            };
-            let ner_item = CheckMenuItem::with_id(
-                app,
-                "toggle_ner",
-                ner_label,
-                cfg!(feature = "ner"),
-                cfg.enable_ner,
-                None::<&str>,
-            )?;
+            // Der frühere NER-Toggle lebt jetzt im „Erkennung"-Tab der App —
+            // dort mit Modell-Download und Sofort-Wirkung statt Setting-Flip
+            // plus Neustart-Bitte (Beta-Befund: Haken ohne Modell tat nichts).
             let show_item =
                 MenuItem::with_id(app, "show", "Fenster anzeigen", true, None::<&str>)?;
             // Klickbarer Bühnen-Einstieg ohne Hotkey: schwärzt den aktuellen
@@ -575,7 +596,6 @@ fn main() {
                 app,
                 &[
                     &auto_item,
-                    &ner_item,
                     &sep1,
                     &stage_item,
                     &show_item,
@@ -612,7 +632,6 @@ fn main() {
             // zurück, damit die UI nicht einen nicht-gespeicherten Zustand
             // vorgaukelt.
             let auto_item_cb = auto_item.clone();
-            let ner_item_cb = ner_item.clone();
             let _tray = tray_builder
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => {
@@ -656,39 +675,6 @@ fn main() {
                                     .title("Streichzeug — nicht gespeichert")
                                     .body(format!(
                                         "Auto-Detection konnte nicht gespeichert werden: {e}. Die Einstellung wurde nicht übernommen."
-                                    ))
-                                    .show();
-                            }
-                        }
-                    }
-                    "toggle_ner" => {
-                        let mut s = Settings::load();
-                        s.enable_ner = !s.enable_ner;
-                        let state_label = if s.enable_ner {
-                            "aktiviert"
-                        } else {
-                            "deaktiviert"
-                        };
-                        match s.save() {
-                            Ok(()) => {
-                                let _ = app
-                                    .notification()
-                                    .builder()
-                                    .title("Streichzeug")
-                                    .body(format!(
-                                        "Erweiterte Erkennung {state_label}. Bitte App neu starten, damit es greift."
-                                    ))
-                                    .show();
-                            }
-                            Err(e) => {
-                                log::error!("settings save failed (toggle_ner): {e}");
-                                let _ = ner_item_cb.set_checked(!s.enable_ner);
-                                let _ = app
-                                    .notification()
-                                    .builder()
-                                    .title("Streichzeug — nicht gespeichert")
-                                    .body(format!(
-                                        "Erweiterte Erkennung konnte nicht gespeichert werden: {e}. Die Einstellung wurde nicht übernommen."
                                     ))
                                     .show();
                             }

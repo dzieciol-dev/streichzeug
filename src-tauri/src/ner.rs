@@ -59,9 +59,30 @@ pub struct NerFinding {
 #[cfg_attr(not(feature = "ner"), allow(dead_code))]
 pub const MIN_CONFIDENCE: f32 = 0.70;
 
-/// Hauptfunktion: liefert NER-Findings für `text`. Bei deaktiviertem
-/// Feature-Flag oder Modell-Load-Fehler → leerer Vektor.
+/// Laufzeit-Gate der NER-Schicht — gespiegelt aus `Settings.enable_ner`
+/// beim App-Start und bei jedem Settings-Save. Vorher wurde das Setting
+/// zur Laufzeit NIRGENDS geprüft: lagen Modell-Dateien vor, lief NER auch
+/// abgeschaltet mit; fehlten sie, bewirkte der Haken nichts (Beta-Befund
+/// 2026-07-06). Der Wert lebt hier statt in einem Settings-Reload pro
+/// Detection-Aufruf — kein Datei-I/O im Hot-Path.
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Setzt das Laufzeit-Gate (App-Start, Settings-Save, Erkennung-Tab).
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn is_enabled() -> bool {
+    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Hauptfunktion: liefert NER-Findings für `text`. Bei abgeschaltetem
+/// Setting, deaktiviertem Feature-Flag oder Modell-Load-Fehler → leerer
+/// Vektor. Das Setting wirkt SOFORT (kein Neustart) — siehe [`set_enabled`].
 pub fn classify(text: &str) -> Vec<NerFinding> {
+    if !is_enabled() {
+        return Vec::new();
+    }
     inference::classify(text)
 }
 
@@ -69,6 +90,18 @@ pub fn classify(text: &str) -> Vec<NerFinding> {
 /// Hauptsächlich für das Settings-UI und Logging.
 pub fn is_ready() -> bool {
     inference::is_ready()
+}
+
+/// Erzwingt einen (erneuten) Lade-Versuch der Engine — nach einem
+/// Modell-Download oder beim Aktivieren im Erkennung-Tab. Anders als der
+/// Lazy-Load in [`classify`] probiert das auch nach einem früheren
+/// Fehlschlag erneut: der Fehlschlag-Cache existiert nur, damit der
+/// Hot-Path (jeder Hotkey-Druck) keine Retry-Stürme fährt — ein bewusster
+/// Klick im UI darf es wieder versuchen (vorher cachte ein `OnceCell`
+/// auch den Fehlschlag für immer, und ein Runtime-Download konnte die
+/// Engine bis zum Neustart nie mehr aktivieren).
+pub fn ensure_loaded() -> bool {
+    inference::ensure_loaded()
 }
 
 /// Plattform-spezifischer Dateiname der ONNX-Runtime-Shared-Library.
@@ -179,7 +212,6 @@ pub async fn download_models() -> Result<std::path::PathBuf, String> {
 mod inference {
     use super::{NerFinding, MIN_CONFIDENCE};
     use ndarray::Array2;
-    use once_cell::sync::OnceCell;
     use ort::session::Session;
     use ort::value::Value;
     use std::path::PathBuf;
@@ -213,46 +245,90 @@ mod inference {
         tokenizer: Tokenizer,
     }
 
-    /// Process-weiter Single-Instance-Cache. `OnceCell<Option<…>>` weil
-    /// auch das „Laden ist fehlgeschlagen"-Ergebnis nur einmal versucht
-    /// werden soll — sonst hätten wir on every call retries.
-    static ENGINE: OnceCell<Option<NerEngine>> = OnceCell::new();
+    /// Process-weiter Engine-Slot. `Unavailable` merkt sich einen
+    /// Fehlschlag, damit der Hot-Path (jeder Hotkey-Druck) keine
+    /// Retry-Stürme fährt — anders als das frühere `OnceCell` ist der
+    /// Zustand aber über [`ensure_loaded`] zurücksetzbar: nach einem
+    /// Runtime-Modell-Download muss die Engine OHNE Neustart ladbar sein.
+    enum EngineSlot {
+        Untried,
+        Unavailable,
+        // Box: clippy::large_enum_variant — die Engine (Session+Tokenizer,
+        // ~1 KB Struct) soll die leeren Varianten nicht aufblähen.
+        Ready(Box<NerEngine>),
+    }
 
-    fn engine() -> Option<&'static NerEngine> {
-        ENGINE
-            .get_or_init(|| {
-                // catch_unwind: ORT-FFI panickt bei manchen Init-Fehlern
-                // (DLL-Version-Mismatch, Modell-Schema, fehlende MSVC-
-                // Runtime, …). Ohne catch_unwind würde dieser Panic
-                // den ganzen Prozess killen — App starte nicht mal mehr
-                // zum Tray-Icon. Mit catch_unwind degradieren wir L3
-                // auf no-op und die App läuft mit L1+L2 weiter.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(try_load));
-                match result {
-                    Ok(Ok(e)) => {
-                        log::info!("ner: engine loaded successfully");
-                        Some(e)
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("ner: engine load failed: {e:#} — L3 will be no-op");
-                        None
-                    }
-                    Err(panic_payload) => {
-                        let msg = panic_payload
-                            .downcast_ref::<&'static str>()
-                            .copied()
-                            .or_else(|| {
-                                panic_payload.downcast_ref::<String>().map(|s| s.as_str())
-                            })
-                            .unwrap_or("<non-string panic>");
-                        log::error!(
-                            "ner: engine load PANICKED: {msg} — L3 disabled, App läuft weiter"
-                        );
-                        None
-                    }
-                }
-            })
-            .as_ref()
+    static ENGINE: std::sync::RwLock<EngineSlot> = std::sync::RwLock::new(EngineSlot::Untried);
+
+    /// Führt `f` mit der geladenen Engine aus; lädt beim ersten Aufruf
+    /// lazy. `None`, wenn die Engine (weiterhin) nicht verfügbar ist.
+    fn with_engine<R>(f: impl FnOnce(&NerEngine) -> R) -> Option<R> {
+        {
+            let slot = ENGINE.read().expect("ENGINE lock poisoned");
+            match &*slot {
+                EngineSlot::Ready(engine) => return Some(f(engine)),
+                EngineSlot::Unavailable => return None,
+                EngineSlot::Untried => {}
+            }
+        }
+        let mut slot = ENGINE.write().expect("ENGINE lock poisoned");
+        if matches!(*slot, EngineSlot::Untried) {
+            *slot = load_slot();
+        }
+        match &*slot {
+            EngineSlot::Ready(engine) => Some(f(engine)),
+            _ => None,
+        }
+    }
+
+    /// Expliziter (Re-)Ladeversuch — auch nach früherem Fehlschlag.
+    pub(super) fn ensure_loaded() -> bool {
+        {
+            let slot = ENGINE.read().expect("ENGINE lock poisoned");
+            if matches!(&*slot, EngineSlot::Ready(_)) {
+                return true;
+            }
+        }
+        let mut slot = ENGINE.write().expect("ENGINE lock poisoned");
+        if matches!(&*slot, EngineSlot::Ready(_)) {
+            return true;
+        }
+        *slot = load_slot();
+        matches!(&*slot, EngineSlot::Ready(_))
+    }
+
+    /// Ein Lade-Versuch → Slot-Zustand. Der `catch_unwind` fängt Panics
+    /// INNERHALB des Locks — der Lock wird dadurch nie vergiftet.
+    fn load_slot() -> EngineSlot {
+        // catch_unwind: ORT-FFI panickt bei manchen Init-Fehlern
+        // (DLL-Version-Mismatch, Modell-Schema, fehlende MSVC-Runtime, …).
+        // Ohne catch_unwind würde dieser Panic den ganzen Prozess killen —
+        // App startete nicht mal mehr zum Tray-Icon. Mit catch_unwind
+        // degradieren wir L3 auf no-op und die App läuft mit L1+L2 weiter.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(try_load));
+        match result {
+            Ok(Ok(engine)) => {
+                log::info!("ner: engine loaded successfully");
+                EngineSlot::Ready(Box::new(engine))
+            }
+            Ok(Err(e)) => {
+                log::warn!("ner: engine load failed: {e:#} — L3 will be no-op");
+                EngineSlot::Unavailable
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<&'static str>()
+                    .copied()
+                    .or_else(|| {
+                        panic_payload.downcast_ref::<String>().map(|s| s.as_str())
+                    })
+                    .unwrap_or("<non-string panic>");
+                log::error!(
+                    "ner: engine load PANICKED: {msg} — L3 disabled, App läuft weiter"
+                );
+                EngineSlot::Unavailable
+            }
+        }
     }
 
     fn try_load() -> anyhow::Result<NerEngine> {
@@ -435,20 +511,18 @@ mod inference {
     }
 
     pub(super) fn is_ready() -> bool {
-        engine().is_some()
+        with_engine(|_| ()).is_some()
     }
 
     pub(super) fn classify(text: &str) -> Vec<NerFinding> {
-        let Some(eng) = engine() else {
-            return vec![];
-        };
-        match run_inference(eng, text) {
+        with_engine(|engine| match run_inference(engine, text) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("ner: inference failed: {e:#}");
                 vec![]
             }
-        }
+        })
+        .unwrap_or_default()
     }
 
     fn run_inference(eng: &NerEngine, text: &str) -> anyhow::Result<Vec<NerFinding>> {
@@ -744,6 +818,10 @@ mod inference {
     }
 
     pub(super) fn is_ready() -> bool {
+        false
+    }
+
+    pub(super) fn ensure_loaded() -> bool {
         false
     }
 }

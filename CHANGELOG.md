@@ -6,6 +6,12 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
+_(noch nichts)_
+
+---
+
+## 0.6.0 — Schwärz-Bühne: sichtbar schwärzen — als Text, formatiert und in Bildern (2026-07-06)
+
 **Neu — Schwärz-Bühne Stufe 3: Bilder und Scans schwärzen (lokale Texterkennung):**
 
 - Bild in die Bühne geben — per **Datei-Drop ins Fenster** oder Screenshot
@@ -126,6 +132,16 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 - Steuer-ID-Erkennung verlangt jetzt ein Kontextwort plus Strukturregel —
   deutlich weniger False-Positives auf beliebige 11-stellige Zahlen.
+- Hex-Literale (`0x…`) und Hashes (Git-SHAs) in technischen Texten werden
+  nicht mehr als Telefonnummer erkannt und geschwärzt.
+
+**Onboarding:**
+
+- Neuer Wizard-Schritt stellt die Schwärz-Bühne vor (Capture-Hotkey,
+  Klick-Einstiege) — auf macOS mit Live-Opt-in für das schwebende Widget.
+- Datei-Drops können die App-Ansicht nicht mehr ersetzen: nicht
+  unterstützte Dateien (z. B. PDF) zeigen einen Hinweis statt die UI zu
+  übernehmen.
 
 ---
 

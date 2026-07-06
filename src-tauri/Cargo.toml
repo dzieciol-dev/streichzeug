@@ -1,6 +1,6 @@
 [package]
 name = "streichzeug"
-version = "0.5.1"
+version = "0.6.0"
 description = "Streichzeug — PII-Erkennung und Pseudonymisierung in der Zwischenablage"
 edition = "2021"
 # 1.88 wegen image 0.25.10 (Stufe-3-Bild-Redaction); davor 1.80 (ammonia 4).

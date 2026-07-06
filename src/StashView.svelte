@@ -22,7 +22,7 @@
     title: string;
     entity_counts: Record<string, number>;
     char_len: number;
-    content_kind: "plain" | "html";
+    content_kind: "plain" | "html" | "image";
   };
 
   // Capture-Hotkey für den Hinweis im leeren Zustand.
@@ -151,6 +151,9 @@
             {#if e.content_kind === "html"}
               <span class="strict-badge" title="Formatierung gespeichert — Kopieren liefert HTML + Text">Formatiert</span>
             {/if}
+            {#if e.content_kind === "image"}
+              <span class="strict-badge" title="Geschwärztes Bild gespeichert — Kopieren liefert Bild + Text">Bild</span>
+            {/if}
           </div>
           <div class="meta">
             <span class="date">{formatDate(e.created_at)}</span>
@@ -162,7 +165,11 @@
           </div>
           <div class="actions">
             <button on:click={() => copyEntry(e.id)}>
-              {e.content_kind === "html" ? "Mit Formatierung kopieren" : "Kopieren"}
+              {e.content_kind === "html"
+                ? "Mit Formatierung kopieren"
+                : e.content_kind === "image"
+                  ? "Bild kopieren"
+                  : "Kopieren"}
             </button>
             <button class="danger" on:click={() => deleteEntry(e.id)}>Löschen</button>
           </div>

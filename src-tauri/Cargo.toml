@@ -3,8 +3,8 @@ name = "streichzeug"
 version = "0.5.1"
 description = "Streichzeug — PII-Erkennung und Pseudonymisierung in der Zwischenablage"
 edition = "2021"
-# 1.80 wegen ammonia 4.x (Stufe-2-HTML-Sanitizing); vorher 1.77.
-rust-version = "1.80"
+# 1.88 wegen image 0.25.10 (Stufe-3-Bild-Redaction); davor 1.80 (ammonia 4).
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dzieciol-dev/streichzeug"
 authors = ["Streichzeug Contributors"]
@@ -52,11 +52,20 @@ kuchikiki = "0.8.8-speedreader"
 # Erzeugen der Annotations-Spans. NICHT unabhängig bumpen.
 html5ever = "0.29"
 
+# Stufe 3 (Schwärz-Bühne): Bild-Redaction. Decode (PNG/JPEG/BMP/TIFF —
+# TIFF liefert die macOS-Pasteboard bei Bildern aus vielen Apps), schwarze
+# Balken rendern, Re-Encode als PNG (strippt EXIF/Metadaten automatisch,
+# weil nur Pixel neu kodiert werden). Bewusst ohne Default-Features —
+# jeder Decoder ist Angriffsfläche für Fremd-Bytes.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
+
 # Token format
 hmac = "0.12"
 sha2 = "0.10"
 base32 = "0.5"
 hex = "0.4"
+# Stufe 3: data:-URL-Encoding des Anzeige-Bilds für die Bild-Bühne.
+base64 = "0.22"
 
 # Kryptographisch sicherer RNG für den Master-Secret. Klein, audited,
 # wrappt das OS-RNG (getrandom on Linux/Mac, BCryptGenRandom on Win).
@@ -124,6 +133,13 @@ windows = { version = "0.58", features = [
     "Win32_System_ProcessStatus",   # GetModuleFileNameExW
     "Win32_UI_WindowsAndMessaging", # GetForegroundWindow, Get/SetWindowLongPtrW (Widget)
     "Win32_UI_Input_KeyboardAndMouse", # GetAsyncKeyState (Modifier-Wait im Capture-Flow)
+    # Stufe 3: lokale OCR über Windows.Media.Ocr (WinRT, kein Netz).
+    "Media_Ocr",
+    "Globalization",                # Language (OCR-Sprachwahl)
+    "Graphics_Imaging",             # BitmapDecoder/SoftwareBitmap
+    "Storage_Streams",              # InMemoryRandomAccessStream/DataWriter
+    "Foundation",                   # IAsyncOperation.get()
+    "Foundation_Collections",
 ] }
 # Hochsprachiges Clipboard-Read; macht uns die OpenClipboard/CloseClipboard/
 # GlobalLock-Dance ab. GetClipboardSequenceNumber polls direkt über windows-rs.
@@ -133,7 +149,22 @@ clipboard-win = "5"
 keyring = { version = "3", features = ["apple-native"] }
 objc2 = "0.5"
 objc2-app-kit = { version = "0.2", features = ["NSPasteboard", "NSWorkspace", "NSRunningApplication", "NSEvent"] }
-objc2-foundation = { version = "0.2", features = ["NSString", "NSArray"] }
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSData"] }
+# Stufe 3: lokale OCR über Apple Vision (VNRecognizeTextRequest, kein Netz).
+# Die 0.3er-Framework-Crates gehören zur objc2-0.6-Generation — das
+# OCR-Modul ist in sich geschlossen (Input &[u8], Output reine Rust-Typen),
+# darum koexistieren beide objc2-Generationen problemlos im Tree. Beim
+# Hochziehen von objc2 auf 0.6 hier konsolidieren.
+objc2-vision = { version = "0.3", features = [
+    "VNRequest",
+    "VNRecognizeTextRequest",
+    "VNRequestHandler",
+    "VNObservation",
+    "VNTypes",
+    "objc2-core-foundation",
+] }
+objc2-foundation06 = { package = "objc2-foundation", version = "0.3", features = ["NSData", "NSString", "NSArray", "NSDictionary", "NSError", "NSValue", "NSRange"] }
+objc2-06 = { package = "objc2", version = "0.6" }
 
 [features]
 default = ["custom-protocol"]

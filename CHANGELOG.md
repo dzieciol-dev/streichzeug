@@ -6,6 +6,24 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
+**Neu — Schwärz-Bühne Stufe 3: Bilder und Scans schwärzen (lokale Texterkennung):**
+
+- Bild in die Bühne geben — per **Datei-Drop ins Fenster** oder Screenshot
+  im Clipboard (Button/Tray/Hotkey, wenn kein Text anliegt): die lokale
+  System-Texterkennung liest den Text (macOS Apple Vision, Windows
+  `Windows.Media.Ocr` — **kein Netz, kein Modell-Download**), die Detection
+  läuft darüber, und schwarze Balken legen sich animiert über die
+  Fundstellen im Bild.
+- Ergebnis: das **geschwärzte Bild** plus der **geschwärzte Text** liegen
+  im Clipboard und in der Ablage („Bild"-Badge, „Bild kopieren"). Das
+  Ausgabe-PNG entsteht durch Neu-Kodieren der Pixel — EXIF/GPS/Metadaten
+  des Originals sind damit immer entfernt. Das Original-Bild wird nie
+  gespeichert.
+- **Ehrlichkeit:** Die Bühne warnt bei jedem Bild sichtbar, dass die
+  Schwärzung auf Texterkennung basiert — was OCR nicht liest
+  (Handschrift, Logos, ungewöhnliche Schriften), bleibt sichtbar und muss
+  visuell geprüft werden.
+
 **Neu — Windows: schwebendes Widget + präziseres Capture-Timing:**
 
 - Das schwebende Widget gibt es jetzt auch auf Windows: nicht-aktivierendes

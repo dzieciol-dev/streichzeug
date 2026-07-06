@@ -386,8 +386,45 @@
     void setWidgetVisible((e.currentTarget as HTMLInputElement).checked);
   }
 
+  // Akzeptiert Text-Markierungen (Stufe 1) und BILD-Dateien (Stufe 3).
+  // Datei-Drops kommen über HTML5 `dataTransfer.files` — `dragDropEnabled`
+  // ist am Main-Window aus, Tauri fängt hier nichts ab (Konzept WP-J).
+  //
+  // WICHTIG: `preventDefault` läuft in onDragOver/onDrop für JEDEN
+  // Datei-Drag — ohne das führt die WebView beim Drop ihre Default-Aktion
+  // aus und NAVIGIERT ZUR DATEI: eine gedroppte PDF ersetzt dann die
+  // komplette App-UI ohne Weg zurück (Beta-Befund 2026-07-05). Die
+  // Annahme-Entscheidung fällt erst im Drop-Handler; nicht schwärzbare
+  // Dateien bekommen dort eine sichtbare Meldung statt einer Navigation.
+  // Zusätzlich fängt ein globaler Guard in main.ts Drops außerhalb von
+  // <main> ab (Onboarding-Wizard, Widget-Fenster).
+  function isStageDrag(e: DragEvent): boolean {
+    const dt = e.dataTransfer;
+    if (!dt) return false;
+    if (dt.types.includes("text/plain")) return true;
+    return Array.from(dt.items ?? []).some(
+      (i) => i.kind === "file" && (i.type === "" || i.type.startsWith("image/"))
+    );
+  }
+
+  function isFileDrag(e: DragEvent): boolean {
+    return !!e.dataTransfer?.types.includes("Files");
+  }
+
+  // Hinweis für nicht schwärzbare Drops (PDF, docx, …) — sichtbar statt
+  // stillem Verwerfen, mit Selbst-Abbau.
+  let dropHint = "";
+  let dropHintTimer = 0;
+  function showDropHint(message: string) {
+    dropHint = message;
+    window.clearTimeout(dropHintTimer);
+    dropHintTimer = window.setTimeout(() => {
+      dropHint = "";
+    }, 8000);
+  }
+
   function onDragEnter(e: DragEvent) {
-    if (e.dataTransfer?.types.includes("text/plain")) {
+    if (isStageDrag(e)) {
       dragDepth += 1;
     }
   }
@@ -397,8 +434,9 @@
   }
 
   function onDragOver(e: DragEvent) {
-    // Nötig, damit der Browser den Drop überhaupt zulässt.
-    if (e.dataTransfer?.types.includes("text/plain")) {
+    // Für schwärzbare Inhalte den Drop zulassen; für ALLE anderen
+    // Datei-Drags die Default-Navigation der WebView unterbinden.
+    if (isStageDrag(e) || isFileDrag(e)) {
       e.preventDefault();
     }
   }
@@ -406,6 +444,29 @@
   async function onDrop(e: DragEvent) {
     e.preventDefault();
     dragDepth = 0;
+
+    // Bilddatei (Stufe 3): Bytes als Raw-Body an stage_image — die Bühne
+    // übernimmt Texterkennung + Schwärzung.
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    const file = files.find((f) => f.type.startsWith("image/"));
+    if (file) {
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await invoke("stage_image", bytes);
+      } catch (err) {
+        console.error("stage_image failed", err);
+      }
+      return;
+    }
+    if (files.length > 0) {
+      // Datei-Drop, aber kein Bild dabei: ehrlich sagen statt still schlucken.
+      showDropHint(
+        "Diese Datei kann Streichzeug (noch) nicht schwärzen — aktuell werden " +
+          "Bilder (PNG/JPEG) und markierter Text unterstützt. PDF-Unterstützung ist geplant."
+      );
+      return;
+    }
+
     const text = e.dataTransfer?.getData("text/plain") ?? "";
     if (!text) return;
     try {
@@ -448,6 +509,10 @@
     <div class="save-error" role="alert">
       <strong>Nicht gespeichert.</strong> {saveError}
     </div>
+  {/if}
+
+  {#if dropHint}
+    <div class="drop-hint" role="status">{dropHint}</div>
   {/if}
 
   {#if view === "stage"}
@@ -817,6 +882,7 @@
   .link-btn { font: inherit; background: none; border: none; padding: 0; color: #2563eb; text-decoration: underline; cursor: pointer; }
   .link-btn:hover { background: none; color: #1d4ed8; }
   .save-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.4; }
+  .drop-hint { background: #fff8e1; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.4; }
   .card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 16px; }
   .usage { font-size: 15px; line-height: 1.5; }

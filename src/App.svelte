@@ -609,6 +609,16 @@
 
       <div class="actions" style="margin-top: 12px;">
         {#if settings.enable_ner}
+          {#if !nerStatus.ready}
+            <!-- Aktiviert, aber Modell/Engine fehlt — genau der Alt-Zustand
+                 aus dem früheren Tray-Toggle. Der Reparatur-Weg gehört
+                 prominent hierhin, nicht hinter Deaktivieren/Aktivieren. -->
+            <button class="primary" on:click={() => setNerEnabled(true)} disabled={nerBusy}>
+              {nerStatus.model_files_present
+                ? "Engine jetzt laden"
+                : "Modell jetzt laden (~145 MB)"}
+            </button>
+          {/if}
           <button on:click={() => setNerEnabled(false)} disabled={nerBusy}>
             Deaktivieren
           </button>

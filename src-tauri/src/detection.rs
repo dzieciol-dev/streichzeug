@@ -216,8 +216,12 @@ static RE_NAME_CANDIDATE: Lazy<Regex> = Lazy::new(|| {
 /// beliebige Buchstaben (auch Großbuchstaben nach Bindestrich), das
 /// letzte Zeichen muss aber lowercase sein.
 static RE_SALUTATION_NAME: Lazy<Regex> = Lazy::new(|| {
+    // Titel ZWISCHEN Anrede und Name („Herr Dr. Demary", „Frau Prof. Dr.
+    // Obst") werden übersprungen, ohne Teil der Capture zu sein — sonst
+    // captured die Name-Gruppe das „Dr" als vermeintlichen Vornamen und der
+    // echte Nachname bleibt ungeschwärzt (Beta-Befund 2026-07-06).
     Regex::new(
-        r"\b(?:Herr|Hr\.|Hrn\.|Frau|Fr\.|Dr\.|Prof\.|Mag\.|Mr\.|Mrs\.|Ms\.)\s+(\p{Lu}\p{Ll}(?:[\p{L}\-]*\p{Ll})?(?:\s+\p{Lu}\p{Ll}(?:[\p{L}\-]*\p{Ll})?)?)\b",
+        r"\b(?:Herr|Hr\.|Hrn\.|Frau|Fr\.|Dr\.|Prof\.|Mag\.|Mr\.|Mrs\.|Ms\.)\s+(?:(?:Dr\.|Prof\.|Mag\.|Dipl\.-Ing\.)\s+)*(\p{Lu}\p{Ll}(?:[\p{L}\-]*\p{Ll})?(?:\s+\p{Lu}\p{Ll}(?:[\p{L}\-]*\p{Ll})?)?)\b",
     )
     .unwrap()
 });
@@ -1063,6 +1067,38 @@ mod tests {
         // damit eine künftige Pattern-Änderung das nicht still aufweicht.
         let f = detect("IdNr im Speicherdump: 0x12345678901");
         assert!(!f.iter().any(|x| x.entity_type == "steuer_id"), "got: {:?}", f);
+    }
+
+    #[test]
+    fn salutation_skips_academic_titles() {
+        // „Herr Dr. Demary": vorher captured die Regex „Dr" als Namen und
+        // ließ den echten Nachnamen stehen (Beta-Befund). Titel zwischen
+        // Anrede und Name dürfen nicht die Capture sein.
+        let f = detect("Lieber Herr Dr. Demary, willkommen.");
+        let persons: Vec<_> = f.iter().filter(|x| x.entity_type == "person").collect();
+        assert!(
+            persons.iter().any(|p| p.original == "Demary"),
+            "Nachname muss erkannt werden, got: {persons:?}"
+        );
+        assert!(
+            !persons.iter().any(|p| p.original == "Dr"),
+            "der Titel Dr darf kein Person-Finding sein, got: {persons:?}"
+        );
+
+        // Auch gestapelte Titel.
+        let f = detect("Sehr geehrter Herr Prof. Dr. Obst,");
+        assert!(
+            f.iter().any(|x| x.entity_type == "person" && x.original == "Obst"),
+            "got: {f:?}"
+        );
+
+        // Titel als eigene Anrede funktioniert weiter.
+        let f = detect("An: Dr. Volker Demary");
+        assert!(
+            f.iter()
+                .any(|x| x.entity_type == "person" && x.original == "Volker Demary"),
+            "got: {f:?}"
+        );
     }
 
     #[test]

@@ -59,9 +59,30 @@ pub struct NerFinding {
 #[cfg_attr(not(feature = "ner"), allow(dead_code))]
 pub const MIN_CONFIDENCE: f32 = 0.70;
 
-/// Hauptfunktion: liefert NER-Findings für `text`. Bei deaktiviertem
-/// Feature-Flag oder Modell-Load-Fehler → leerer Vektor.
+/// Laufzeit-Gate der NER-Schicht — gespiegelt aus `Settings.enable_ner`
+/// beim App-Start und bei jedem Settings-Save. Vorher wurde das Setting
+/// zur Laufzeit NIRGENDS geprüft: lagen Modell-Dateien vor, lief NER auch
+/// abgeschaltet mit; fehlten sie, bewirkte der Haken nichts (Beta-Befund
+/// 2026-07-06). Der Wert lebt hier statt in einem Settings-Reload pro
+/// Detection-Aufruf — kein Datei-I/O im Hot-Path.
+static ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Setzt das Laufzeit-Gate (App-Start, Settings-Save, Erkennung-Tab).
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn is_enabled() -> bool {
+    ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Hauptfunktion: liefert NER-Findings für `text`. Bei abgeschaltetem
+/// Setting, deaktiviertem Feature-Flag oder Modell-Load-Fehler → leerer
+/// Vektor. Das Setting wirkt SOFORT (kein Neustart) — siehe [`set_enabled`].
 pub fn classify(text: &str) -> Vec<NerFinding> {
+    if !is_enabled() {
+        return Vec::new();
+    }
     inference::classify(text)
 }
 
@@ -69,6 +90,18 @@ pub fn classify(text: &str) -> Vec<NerFinding> {
 /// Hauptsächlich für das Settings-UI und Logging.
 pub fn is_ready() -> bool {
     inference::is_ready()
+}
+
+/// Erzwingt einen (erneuten) Lade-Versuch der Engine — nach einem
+/// Modell-Download oder beim Aktivieren im Erkennung-Tab. Anders als der
+/// Lazy-Load in [`classify`] probiert das auch nach einem früheren
+/// Fehlschlag erneut: der Fehlschlag-Cache existiert nur, damit der
+/// Hot-Path (jeder Hotkey-Druck) keine Retry-Stürme fährt — ein bewusster
+/// Klick im UI darf es wieder versuchen (vorher cachte ein `OnceCell`
+/// auch den Fehlschlag für immer, und ein Runtime-Download konnte die
+/// Engine bis zum Neustart nie mehr aktivieren).
+pub fn ensure_loaded() -> bool {
+    inference::ensure_loaded()
 }
 
 /// Plattform-spezifischer Dateiname der ONNX-Runtime-Shared-Library.
@@ -148,6 +181,19 @@ fn manifest_lists_native_lib(manifest_path: &std::path::Path) -> bool {
 /// Macht das Verzeichnis auf Abruf hin sichtbar — der Caller kann's für
 /// User-Feedback nutzen („Modell wird nach … geladen").
 pub fn user_models_dir() -> Option<std::path::PathBuf> {
+    // Test-Builds: NIE das echte Modell-Verzeichnis anfassen — sobald die
+    // echten Dateien vorliegen, würde jeder Test-Lauf die ORT-Bibliothek
+    // laden, und deren C++-Statics reißen den Testprozess beim Teardown
+    // mit SIGABRT („mutex lock failed") ab. Tests laufen deshalb gegen ein
+    // leeres Verzeichnis; die ignored-Diagnose-Tests zeigen explizit per
+    // STREICHZEUG_TEST_MODELS_DIR auf die echten Dateien (und akzeptieren
+    // dafür den unsauberen Prozess-Exit ihres Einzel-Laufs).
+    if cfg!(test) {
+        if let Ok(dir) = std::env::var("STREICHZEUG_TEST_MODELS_DIR") {
+            return Some(std::path::PathBuf::from(dir));
+        }
+        return Some(std::env::temp_dir().join("streichzeug-test-models-leer"));
+    }
     dirs::data_local_dir().map(|d| d.join("de.streichzeug.app").join("models"))
 }
 
@@ -179,7 +225,6 @@ pub async fn download_models() -> Result<std::path::PathBuf, String> {
 mod inference {
     use super::{NerFinding, MIN_CONFIDENCE};
     use ndarray::Array2;
-    use once_cell::sync::OnceCell;
     use ort::session::Session;
     use ort::value::Value;
     use std::path::PathBuf;
@@ -213,46 +258,90 @@ mod inference {
         tokenizer: Tokenizer,
     }
 
-    /// Process-weiter Single-Instance-Cache. `OnceCell<Option<…>>` weil
-    /// auch das „Laden ist fehlgeschlagen"-Ergebnis nur einmal versucht
-    /// werden soll — sonst hätten wir on every call retries.
-    static ENGINE: OnceCell<Option<NerEngine>> = OnceCell::new();
+    /// Process-weiter Engine-Slot. `Unavailable` merkt sich einen
+    /// Fehlschlag, damit der Hot-Path (jeder Hotkey-Druck) keine
+    /// Retry-Stürme fährt — anders als das frühere `OnceCell` ist der
+    /// Zustand aber über [`ensure_loaded`] zurücksetzbar: nach einem
+    /// Runtime-Modell-Download muss die Engine OHNE Neustart ladbar sein.
+    enum EngineSlot {
+        Untried,
+        Unavailable,
+        // Box: clippy::large_enum_variant — die Engine (Session+Tokenizer,
+        // ~1 KB Struct) soll die leeren Varianten nicht aufblähen.
+        Ready(Box<NerEngine>),
+    }
 
-    fn engine() -> Option<&'static NerEngine> {
-        ENGINE
-            .get_or_init(|| {
-                // catch_unwind: ORT-FFI panickt bei manchen Init-Fehlern
-                // (DLL-Version-Mismatch, Modell-Schema, fehlende MSVC-
-                // Runtime, …). Ohne catch_unwind würde dieser Panic
-                // den ganzen Prozess killen — App starte nicht mal mehr
-                // zum Tray-Icon. Mit catch_unwind degradieren wir L3
-                // auf no-op und die App läuft mit L1+L2 weiter.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(try_load));
-                match result {
-                    Ok(Ok(e)) => {
-                        log::info!("ner: engine loaded successfully");
-                        Some(e)
-                    }
-                    Ok(Err(e)) => {
-                        log::warn!("ner: engine load failed: {e:#} — L3 will be no-op");
-                        None
-                    }
-                    Err(panic_payload) => {
-                        let msg = panic_payload
-                            .downcast_ref::<&'static str>()
-                            .copied()
-                            .or_else(|| {
-                                panic_payload.downcast_ref::<String>().map(|s| s.as_str())
-                            })
-                            .unwrap_or("<non-string panic>");
-                        log::error!(
-                            "ner: engine load PANICKED: {msg} — L3 disabled, App läuft weiter"
-                        );
-                        None
-                    }
-                }
-            })
-            .as_ref()
+    static ENGINE: std::sync::RwLock<EngineSlot> = std::sync::RwLock::new(EngineSlot::Untried);
+
+    /// Führt `f` mit der geladenen Engine aus; lädt beim ersten Aufruf
+    /// lazy. `None`, wenn die Engine (weiterhin) nicht verfügbar ist.
+    fn with_engine<R>(f: impl FnOnce(&NerEngine) -> R) -> Option<R> {
+        {
+            let slot = ENGINE.read().expect("ENGINE lock poisoned");
+            match &*slot {
+                EngineSlot::Ready(engine) => return Some(f(engine)),
+                EngineSlot::Unavailable => return None,
+                EngineSlot::Untried => {}
+            }
+        }
+        let mut slot = ENGINE.write().expect("ENGINE lock poisoned");
+        if matches!(*slot, EngineSlot::Untried) {
+            *slot = load_slot();
+        }
+        match &*slot {
+            EngineSlot::Ready(engine) => Some(f(engine)),
+            _ => None,
+        }
+    }
+
+    /// Expliziter (Re-)Ladeversuch — auch nach früherem Fehlschlag.
+    pub(super) fn ensure_loaded() -> bool {
+        {
+            let slot = ENGINE.read().expect("ENGINE lock poisoned");
+            if matches!(&*slot, EngineSlot::Ready(_)) {
+                return true;
+            }
+        }
+        let mut slot = ENGINE.write().expect("ENGINE lock poisoned");
+        if matches!(&*slot, EngineSlot::Ready(_)) {
+            return true;
+        }
+        *slot = load_slot();
+        matches!(&*slot, EngineSlot::Ready(_))
+    }
+
+    /// Ein Lade-Versuch → Slot-Zustand. Der `catch_unwind` fängt Panics
+    /// INNERHALB des Locks — der Lock wird dadurch nie vergiftet.
+    fn load_slot() -> EngineSlot {
+        // catch_unwind: ORT-FFI panickt bei manchen Init-Fehlern
+        // (DLL-Version-Mismatch, Modell-Schema, fehlende MSVC-Runtime, …).
+        // Ohne catch_unwind würde dieser Panic den ganzen Prozess killen —
+        // App startete nicht mal mehr zum Tray-Icon. Mit catch_unwind
+        // degradieren wir L3 auf no-op und die App läuft mit L1+L2 weiter.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(try_load));
+        match result {
+            Ok(Ok(engine)) => {
+                log::info!("ner: engine loaded successfully");
+                EngineSlot::Ready(Box::new(engine))
+            }
+            Ok(Err(e)) => {
+                log::warn!("ner: engine load failed: {e:#} — L3 will be no-op");
+                EngineSlot::Unavailable
+            }
+            Err(panic_payload) => {
+                let msg = panic_payload
+                    .downcast_ref::<&'static str>()
+                    .copied()
+                    .or_else(|| {
+                        panic_payload.downcast_ref::<String>().map(|s| s.as_str())
+                    })
+                    .unwrap_or("<non-string panic>");
+                log::error!(
+                    "ner: engine load PANICKED: {msg} — L3 disabled, App läuft weiter"
+                );
+                EngineSlot::Unavailable
+            }
+        }
     }
 
     fn try_load() -> anyhow::Result<NerEngine> {
@@ -406,6 +495,19 @@ mod inference {
     ///
     /// Erster Treffer mit existierender `model.onnx` gewinnt.
     fn models_dir() -> anyhow::Result<PathBuf> {
+        // Test-Builds: NIE die echten Modell-Dateien laden — die ORT-C++-
+        // Statics reißen den Testprozess beim Teardown mit SIGABRT ab
+        // („mutex lock failed"). Nur die ignored-Diagnose-Tests zeigen
+        // explizit per Env-Var auf die echten Dateien.
+        if cfg!(test) {
+            return match std::env::var("STREICHZEUG_TEST_MODELS_DIR") {
+                Ok(dir) => Ok(PathBuf::from(dir)),
+                Err(_) => anyhow::bail!(
+                    "Test-Build: Modell-Laden ist deaktiviert (STREICHZEUG_TEST_MODELS_DIR nicht gesetzt)"
+                ),
+            };
+        }
+
         let exe = std::env::current_exe()?;
         let exe_dir = exe
             .parent()
@@ -435,20 +537,83 @@ mod inference {
     }
 
     pub(super) fn is_ready() -> bool {
-        engine().is_some()
+        with_engine(|_| ()).is_some()
     }
 
     pub(super) fn classify(text: &str) -> Vec<NerFinding> {
-        let Some(eng) = engine() else {
-            return vec![];
-        };
-        match run_inference(eng, text) {
+        with_engine(|engine| match run_inference_chunked(engine, text) {
             Ok(v) => v,
             Err(e) => {
                 log::warn!("ner: inference failed: {e:#}");
                 vec![]
             }
+        })
+        .unwrap_or_default()
+    }
+
+    /// Positions-Limit des DistilBERT-Modells (Positional Embeddings).
+    /// Längere Eingaben MÜSSEN gefenstert werden — vorher scheiterte die
+    /// Inferenz an >512 Tokens KOMPLETT (ORT-Broadcast-Fehler „512 by 725")
+    /// und NER lieferte für normale lange Mails still gar nichts
+    /// (Beta-Befund 2026-07-06).
+    const MAX_MODEL_TOKENS: usize = 512;
+    /// Nutz-Tokens pro Fenster — Puffer für [CLS]/[SEP]-Sondertokens, die
+    /// `encode(text, true)` in [`run_inference`] zusätzlich anfügt.
+    const CHUNK_TOKENS: usize = 480;
+    /// Überlappung zwischen Fenstern, damit Entities an Schnittkanten
+    /// nicht halbiert werden.
+    const CHUNK_OVERLAP_TOKENS: usize = 48;
+
+    /// Fenstert lange Texte auf Modell-taugliche Stücke und führt die
+    /// Findings (Byte-Offsets zurückverschoben) zusammen. Kurze Texte gehen
+    /// direkt durch. Identische Doppel-Findings aus der Überlappung werden
+    /// hier dedupliziert; teilweise überlappende entschärft downstream
+    /// `detection::dedupe_and_sort` (längerer Span gewinnt).
+    fn run_inference_chunked(eng: &NerEngine, text: &str) -> anyhow::Result<Vec<NerFinding>> {
+        // Encoding OHNE Sondertokens — nur für die Schnittpunkte (die
+        // Offsets sind Byte-Offsets an Token-Grenzen, also Char-sicher).
+        let encoding = eng
+            .tokenizer
+            .encode(text, false)
+            .map_err(|e| anyhow::anyhow!("encode (chunking): {e}"))?;
+        let offsets = encoding.get_offsets();
+        if offsets.len() + 2 <= MAX_MODEL_TOKENS {
+            return run_inference(eng, text);
         }
+        log::info!(
+            "ner: Text hat {} Tokens — fenstere in {}er-Stücke (Überlappung {})",
+            offsets.len(),
+            CHUNK_TOKENS,
+            CHUNK_OVERLAP_TOKENS
+        );
+
+        let mut findings: Vec<NerFinding> = Vec::new();
+        let mut start_tok = 0usize;
+        loop {
+            let end_tok = (start_tok + CHUNK_TOKENS).min(offsets.len());
+            let byte_start = offsets[start_tok].0;
+            let byte_end = if end_tok == offsets.len() {
+                text.len()
+            } else {
+                offsets[end_tok].0
+            };
+            let chunk = &text[byte_start..byte_end];
+            for mut f in run_inference(eng, chunk)? {
+                f.start += byte_start;
+                f.end += byte_start;
+                let duplicate = findings.iter().any(|g| {
+                    g.start == f.start && g.end == f.end && g.entity_type == f.entity_type
+                });
+                if !duplicate {
+                    findings.push(f);
+                }
+            }
+            if end_tok == offsets.len() {
+                break;
+            }
+            start_tok = end_tok.saturating_sub(CHUNK_OVERLAP_TOKENS);
+        }
+        Ok(findings)
     }
 
     fn run_inference(eng: &NerEngine, text: &str) -> anyhow::Result<Vec<NerFinding>> {
@@ -746,6 +911,10 @@ mod inference {
     pub(super) fn is_ready() -> bool {
         false
     }
+
+    pub(super) fn ensure_loaded() -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -946,12 +1115,32 @@ mod downloader {
             let mut tar = tar::Archive::new(gz);
             for entry in tar.entries()? {
                 let mut entry = entry?;
-                let path = entry.path()?.into_owned();
-                if path.file_name().and_then(|n| n.to_str()) == Some(ort_lib_name()) {
-                    entry.unpack(target)?;
-                    log::info!("ner download: extracted {}", target.display());
-                    return Ok(());
+                // NUR reguläre Dateien: Im ORT-Archiv ist der unversionierte
+                // Name (libonnxruntime.dylib) ein SYMLINK auf die versionierte
+                // Datei (libonnxruntime.1.22.0.dylib). Das frühere
+                // entry.unpack() des Symlink-Eintrags erzeugte einen TOTEN
+                // Link — der Manifest-Hash scheiterte dann mit ENOENT
+                // (Beta-Befund 2026-07-06). Deshalb: den versionierten
+                // Datei-Eintrag inhaltlich unter dem Zielnamen ablegen.
+                if entry.header().entry_type() != tar::EntryType::Regular {
+                    continue;
                 }
+                let path = entry.path()?.into_owned();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !is_ort_lib_file(name) {
+                    continue;
+                }
+                // Etwaigen Alt-Zustand (toter Symlink aus früheren Downloads)
+                // wegräumen — File::create würde sonst DURCH den Link schreiben.
+                let _ = std::fs::remove_file(target);
+                let mut out = std::fs::File::create(target)
+                    .with_context(|| format!("create target {}", target.display()))?;
+                std::io::copy(&mut entry, &mut out)
+                    .with_context(|| format!("extract {name} → {}", target.display()))?;
+                log::info!("ner download: extracted {} (aus {name})", target.display());
+                return Ok(());
             }
             anyhow::bail!("ORT-Shared-Library nicht in Archive gefunden");
         }
@@ -994,6 +1183,20 @@ mod downloader {
         }
     }
 
+    /// Matcht die ORT-Hauptbibliothek — unversioniert („libonnxruntime.dylib")
+    /// wie versioniert („libonnxruntime.1.22.0.dylib", „libonnxruntime.so.1.22.0").
+    /// Der Punkt nach dem Stamm grenzt gegen Nachbar-Libs wie
+    /// „libonnxruntime_providers_shared.so" ab.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn is_ort_lib_file(name: &str) -> bool {
+        if name == ort_lib_name() {
+            return true;
+        }
+        name.strip_prefix("libonnxruntime")
+            .map(|rest| rest.starts_with('.') && (rest.ends_with(".dylib") || rest.contains(".so")))
+            .unwrap_or(false)
+    }
+
     fn write_manifest(dir: &std::path::Path) -> Result<()> {
         use std::io::Write;
         let mut content = String::new();
@@ -1012,5 +1215,93 @@ mod downloader {
         let mut file = std::fs::File::create(dir.join("MANIFEST.sha256"))?;
         file.write_all(content.as_bytes())?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "ner"))]
+mod diagnose_tests {
+    /// Diagnose gegen die ECHTE Engine (braucht heruntergeladene Modell-
+    /// Dateien im User-Datenverzeichnis) — bewusst `#[ignore]`:
+    /// `cargo test --features ner -- --ignored diagnose --nocapture`
+    /// Zeigt den Test-Prozess auf die ECHTEN Modell-Dateien (Tests laufen
+    /// sonst bewusst gegen ein leeres Verzeichnis, s. user_models_dir).
+    fn point_at_real_models() {
+        let real = dirs::data_local_dir()
+            .expect("data dir")
+            .join("de.streichzeug.app")
+            .join("models");
+        std::env::set_var("STREICHZEUG_TEST_MODELS_DIR", &real);
+    }
+
+    #[test]
+    #[ignore]
+    fn diagnose_salutation_names() {
+        point_at_real_models();
+        super::set_enabled(true);
+        let ready = super::ensure_loaded();
+        println!("engine ready: {ready}");
+        for text in [
+            "Lieber Herr Dr. Demary,",
+            "lieber Herr Dr. Obst,",
+            "Volker Demary und Andreas Obst treffen sich in Dortmund.",
+            // Länge/Struktur wie eine echte Mail — reproduziert den
+            // Beta-Befund, dass NER im langen Text nichts liefert.
+            "Betreff: NPL-Grundlagenstudie: Literatur und BKS-Plattform\n\nLieber Herr Dr. Demary,\nlieber Herr Dr. Obst,\n\nvielen Dank!",
+            // Gleicher Text OHNE Umlaute/Sonderzeichen zur Abgrenzung.
+            "Betreff: Studie\n\nLieber Herr Dr. Demary,\nlieber Herr Dr. Obst,\n\nvielen Dank!",
+        ] {
+            let findings = super::classify(text);
+            println!("{text:?} -> {findings:?}");
+        }
+    }
+
+    /// Lange Mail (>512 Tokens) — vorher scheiterte die Inferenz komplett
+    /// (ORT-Broadcast „512 by 725") und NER lieferte still nichts.
+    #[test]
+    #[ignore]
+    fn diagnose_long_text_chunking() {
+        point_at_real_models();
+        super::set_enabled(true);
+        assert!(super::ensure_loaded());
+        // Füller erzeugt >512 Tokens; die Namen stehen am Anfang UND am
+        // Ende — beide müssen durchs Fenster-Chunking gefunden werden.
+        let filler = "Die Plattform aggregiert Literatur zu notleidenden Krediten und stellt Volltexte bereit. ".repeat(40);
+        let text = format!(
+            "Lieber Herr Dr. Demary,\n\n{filler}\nMit freundlichen Grüßen\nVolker Demary und Andreas Obst"
+        );
+        let findings = super::classify(&text);
+        println!("findings: {findings:?}");
+        assert!(
+            findings.iter().any(|f| f.text.contains("Demary") && f.start < 30),
+            "Name am ANFANG des langen Texts fehlt"
+        );
+        assert!(
+            findings.iter().any(|f| f.text.contains("Obst") && f.start > 1000),
+            "Name am ENDE des langen Texts fehlt"
+        );
+    }
+
+    /// Voller detect()-Durchlauf über einen realistischen Mail-Anfang mit
+    /// Umlauten VOR den Namen — prüft, ob NER-Findings die Pipeline
+    /// (Offset-Mapping, Dedupe) überleben.
+    #[test]
+    #[ignore]
+    fn diagnose_full_detect_email() {
+        point_at_real_models();
+        super::set_enabled(true);
+        assert!(super::ensure_loaded());
+        let text = "Betreff: NPL-Grundlagenstudie: Literatur und BKS-Plattform\n\nLieber Herr Dr. Demary,\nlieber Herr Dr. Obst,\n\nvielen Dank für die Rückmeldung — schöne Grüße aus München.";
+        let findings = crate::detection::detect(text);
+        for f in &findings {
+            println!("{}..{} {} {:?} conf={}", f.start, f.end, f.entity_type, f.original, f.confidence);
+        }
+        assert!(
+            findings.iter().any(|f| f.original == "Demary"),
+            "Demary fehlt im Gesamtergebnis"
+        );
+        assert!(
+            findings.iter().any(|f| f.original.contains("Obst")),
+            "Obst fehlt im Gesamtergebnis"
+        );
     }
 }

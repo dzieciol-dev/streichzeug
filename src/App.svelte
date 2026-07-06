@@ -57,14 +57,26 @@
     widget_position: null
   };
 
-  // Leichtes View-Konzept (kein Router). Die Bühne öffnet sich event-getrieben.
-  let view: "status" | "stage" | "stash" = "status";
+  // Leichtes View-Konzept (kein Router): vier Tabs, die Bühne öffnet sich
+  // zusätzlich event-getrieben. Tabs statt einer langen Karten-Liste —
+  // mit Bühne, Ablage, Erkennung und allen Einstellungen war die eine
+  // Seite zu voll geworden.
+  type Tab = "status" | "stash" | "erkennung" | "einstellungen";
+  let view: Tab | "stage" = "status";
   // View, zu der „Schließen" der Bühne zurückkehrt (die vor dem Event aktive).
-  let prevView: "status" | "stash" = "status";
+  let prevView: Tab = "status";
+
+  const TABS: { key: Tab; label: string }[] = [
+    { key: "status", label: "Status" },
+    { key: "stash", label: "Ablage" },
+    { key: "erkennung", label: "Erkennung" },
+    { key: "einstellungen", label: "Einstellungen" },
+  ];
+
   let stageJob: StageJob | null = null;
   let stageUnlisten: UnlistenFn | null = null;
 
-  function goStatus() { view = "status"; }
+  function goTab(tab: Tab) { view = tab; }
   function goStash() { view = "stash"; }
   function closeStage() { view = prevView; }
   let storageStatus: StorageStatus = { mapping_count: 0, retention_minutes: 60 };
@@ -96,6 +108,41 @@
     model_files_present: false,
     user_models_dir: null
   };
+
+  // ---------------------------------------------- Erweiterte Erkennung (NER)
+  // An/Aus läuft komplett über den Erkennung-Tab: fehlt das Modell, wird es
+  // beim Aktivieren zuerst geladen; set_ner_enabled persistiert, zieht das
+  // Laufzeit-Gate nach und lädt die Engine sofort — kein Neustart.
+  let nerBusy = false;
+  let nerActionStatus = "";
+
+  async function setNerEnabled(on: boolean) {
+    nerBusy = true;
+    nerActionStatus = on ? "Aktiviere …" : "Deaktiviere …";
+    try {
+      if (on && !nerStatus.model_files_present) {
+        nerActionStatus = "Lade Modell + Runtime (~145 MB) — kann 1–3 Minuten dauern …";
+        await invoke("download_ner_model");
+        nerStatus = await invoke<NerStatus>("get_ner_status");
+      }
+      nerActionStatus = on ? "Lade Engine …" : "Deaktiviere …";
+      nerStatus = await invoke<NerStatus>("set_ner_enabled", { enabled: on });
+      settings = { ...settings, enable_ner: on };
+      saveError = "";
+      if (!on) {
+        nerActionStatus = "Deaktiviert — wirkt sofort.";
+      } else if (nerStatus.ready) {
+        nerActionStatus = "Aktiv — Modell geladen, wirkt sofort.";
+      } else {
+        nerActionStatus =
+          "Aktiviert, aber die Engine konnte nicht geladen werden — Details im Log (Bug melden → Log kopieren).";
+      }
+    } catch (e) {
+      nerActionStatus = `Fehler: ${e}`;
+    } finally {
+      nerBusy = false;
+    }
+  }
 
   async function loadAll() {
     try {
@@ -341,7 +388,7 @@
     });
     // Einziger Listener-Ort für die Bühne: Payload merken, Bühne öffnen.
     stageUnlisten = await listen<StageJob>("stage://job", (event) => {
-      if (view !== "stage") prevView = view === "stash" ? "stash" : "status";
+      if (view !== "stage") prevView = view;
       stageJob = event.payload;
       view = "stage";
     });
@@ -364,6 +411,39 @@
       await invoke("stage_clipboard");
     } catch (e) {
       console.error("stage_clipboard failed", e);
+    }
+  }
+
+  // Paste-Feld: nimmt Text ODER Bild (Screenshot) aus dem Paste-Event
+  // entgegen und schickt es direkt an die Bühne. preventDefault sorgt
+  // dafür, dass NIE Original-Inhalt im Feld (DOM) landet.
+  async function onPasteField(e: ClipboardEvent) {
+    e.preventDefault();
+    const dt = e.clipboardData;
+    if (!dt) return;
+
+    const imageItem = Array.from(dt.items ?? []).find(
+      (i) => i.kind === "file" && i.type.startsWith("image/")
+    );
+    if (imageItem) {
+      const file = imageItem.getAsFile();
+      if (file) {
+        try {
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          await invoke("stage_image", bytes);
+        } catch (err) {
+          console.error("stage_image (paste) failed", err);
+        }
+        return;
+      }
+    }
+
+    const text = dt.getData("text/plain");
+    if (!text) return;
+    try {
+      await invoke("stage_text", { text });
+    } catch (err) {
+      console.error("stage_text (paste) failed", err);
     }
   }
 
@@ -501,8 +581,9 @@
   </header>
 
   <nav class="view-switch" aria-label="Ansicht">
-    <button class:active={view === "status"} on:click={goStatus}>Status</button>
-    <button class:active={view === "stash"} on:click={goStash}>Ablage</button>
+    {#each TABS as tab (tab.key)}
+      <button class:active={view === tab.key} on:click={() => goTab(tab.key)}>{tab.label}</button>
+    {/each}
   </nav>
 
   {#if saveError}
@@ -528,45 +609,74 @@
     {/if}
   {:else if view === "stash"}
     <StashView stageHotkey={settings.stage_hotkey} />
-  {:else}
+  {:else if view === "erkennung"}
 
-  <section class="card stage-entry-card">
-    <h2>Schwärzen — ohne Hotkey</h2>
+  <section class="card ner-card">
+    <h2>Erweiterte Erkennung (lokales KI-Modell)</h2>
     <p class="usage">
-      Text irgendwo kopieren und hier klicken — oder markierten Text
-      einfach <strong>in dieses Fenster ziehen</strong>.
+      Zusätzlich zur eingebauten Regex- und Listen-Erkennung kann ein
+      lokales NER-Modell Personen, Orte und Organisationen statistisch
+      erkennen — auch ohne Anrede oder GmbH-Suffix. Läuft komplett offline;
+      der einmalige Modell-Download (~145 MB) ist die einzige
+      Netzverbindung, die diese Funktion je aufbaut.
     </p>
-    <div class="actions">
-      <button class="primary" on:click={stageFromClipboard}>
-        Zwischenablage schwärzen
-      </button>
-      <button on:click={() => setWidgetVisible(!settings.show_widget)}>
-        {settings.show_widget ? "Widget ausblenden" : "Widget einblenden"}
-      </button>
-    </div>
-    <p class="hint">
-      Das Ergebnis landet geschwärzt in der Zwischenablage und in der
-      Ablage. Schneller geht's mit dem Hotkey
-      <kbd>{prettyHotkey(settings.stage_hotkey)}</kbd> direkt auf einer
-      Markierung — oder per Klick aufs schwebende Widget
-      (Rechtsklick darauf: ausblenden).
-    </p>
+
+    {#if !nerStatus.built_with_ner_feature}
+      <p class="warning-box">
+        Dieser Build enthält das NER-Feature nicht (Slim-Build ohne
+        <code>--features ner</code>) — die erweiterte Erkennung ist hier
+        nicht verfügbar.
+      </p>
+    {:else}
+      <div class="status-row">
+        <span class="status-badge {settings.enable_ner ? 'on' : 'off'}">
+          {settings.enable_ner ? "Aktiviert" : "Deaktiviert"}
+        </span>
+        <span class="status-badge {nerStatus.model_files_present ? 'on' : 'off'}">
+          Modell: {nerStatus.model_files_present ? "vorhanden" : "nicht geladen"}
+        </span>
+        <span class="status-badge {nerStatus.ready ? 'on' : 'off'}">
+          Engine: {nerStatus.ready ? "bereit" : "nicht geladen"}
+        </span>
+      </div>
+
+      <div class="actions" style="margin-top: 12px;">
+        {#if settings.enable_ner}
+          {#if !nerStatus.ready}
+            <!-- Aktiviert, aber Modell/Engine fehlt — genau der Alt-Zustand
+                 aus dem früheren Tray-Toggle. Der Reparatur-Weg gehört
+                 prominent hierhin, nicht hinter Deaktivieren/Aktivieren. -->
+            <button class="primary" on:click={() => setNerEnabled(true)} disabled={nerBusy}>
+              {nerStatus.model_files_present
+                ? "Engine jetzt laden"
+                : "Modell jetzt laden (~145 MB)"}
+            </button>
+          {/if}
+          <button on:click={() => setNerEnabled(false)} disabled={nerBusy}>
+            Deaktivieren
+          </button>
+        {:else}
+          <button class="primary" on:click={() => setNerEnabled(true)} disabled={nerBusy}>
+            {nerStatus.model_files_present
+              ? "Aktivieren"
+              : "Aktivieren & Modell laden (~145 MB)"}
+          </button>
+        {/if}
+      </div>
+      {#if nerActionStatus}
+        <p class="hint" style="margin-top: 8px;">{nerActionStatus}</p>
+      {/if}
+      <p class="hint">
+        Wirkt sofort — kein Neustart nötig. Trade-off: ~300 ms einmalige
+        Ladezeit und ~50 ms zusätzlich pro Schwärzung.
+        {#if nerStatus.user_models_dir}
+          Modell-Verzeichnis: <code>{nerStatus.user_models_dir}</code>
+        {/if}
+      </p>
+    {/if}
   </section>
 
-  <section class="card">
-    <h2>So nutzt du die App</h2>
-    <p class="usage">
-      In jeder App: Text kopieren, dann <kbd>{prettyHotkey(settings.hotkey)}</kbd>
-      statt <kbd>{prettyHotkey("CmdOrCtrl+V")}</kbd> drücken.
-    </p>
-    <ul class="bullets">
-      <li>Enthält der Text personenbezogene Daten → fügt die anonymisierte Version ein</li>
-      <li>Enthält der Text Tokens aus einer LLM-Antwort → fügt die Originale wieder ein</li>
-      <li>Sonst → fügt unverändert ein, wie ein normales <kbd>{prettyHotkey("CmdOrCtrl+V")}</kbd></li>
-    </ul>
-  </section>
-
-  <section class="card mode-card">
+<section class="card mode-card">
     <h2>Verarbeitungsmodus</h2>
     <p class="usage">
       Welche Art von DSGVO-Schutz soll die App anwenden?
@@ -616,6 +726,14 @@
       Compliance-Details: siehe <code>COMPLIANCE.md</code> im Installations-Verzeichnis.
     </p>
   </section>
+
+  {:else if view === "einstellungen"}
+
+  
+
+  
+
+  
 
   <section class="card">
     <h2>Hotkey ändern</h2>
@@ -752,24 +870,7 @@
     </label>
   </section>
 
-  <section class="card">
-    <h2>Status</h2>
-    <div class="status-row">
-      <span class="status-badge on">
-        Hotkey: {prettyHotkey(settings.hotkey)}
-      </span>
-      {#each [nerStatusBadge(nerStatus)] as b}
-        <span class="status-badge {b.cls}">{b.label}</span>
-      {/each}
-      <span class="status-badge {settings.auto_detection ? 'on' : 'off'}">
-        Auto-Detection: {settings.auto_detection ? "aktiv" : "aus"}
-      </span>
-    </div>
-    <p class="hint">
-      Einstellungen über das Tray-Icon (Systemleiste unten rechts).
-      Toggle-Änderungen erfordern einen App-Neustart.
-    </p>
-  </section>
+  
 
   <section class="card">
     <h2>Datenspeicherung (DSGVO)</h2>
@@ -856,6 +957,74 @@
     </p>
   </section>
 
+
+  {:else}
+
+  <section class="card">
+    <h2>Status</h2>
+    <div class="status-row">
+      <span class="status-badge on">
+        Hotkey: {prettyHotkey(settings.hotkey)}
+      </span>
+      {#each [nerStatusBadge(nerStatus)] as b}
+        <span class="status-badge {b.cls}">{b.label}</span>
+      {/each}
+      <span class="status-badge {settings.auto_detection ? 'on' : 'off'}">
+        Auto-Detection: {settings.auto_detection ? "aktiv" : "aus"}
+      </span>
+    </div>
+    <p class="hint">
+      Die erweiterte Erkennung verwaltest du im Tab „Erkennung", alles
+      andere im Tab „Einstellungen". Auto-Detection lässt sich zusätzlich
+      über das Tray-Icon umschalten (Neustart nötig).
+    </p>
+  </section>
+
+  <section class="card stage-entry-card">
+    <h2>Schwärzen — ohne Hotkey</h2>
+    <!-- Paste-Ziel: Das Feld ZEIGT den Inhalt nie an (preventDefault beim
+         Paste) — der Text/Screenshot geht direkt an die Bühne, es bleibt
+         kein Original im DOM stehen. -->
+    <textarea
+      class="paste-field"
+      rows="2"
+      placeholder="Hier klicken und einfügen (⌘V) — Text oder Screenshot wird sofort geschwärzt"
+      on:paste={onPasteField}
+    ></textarea>
+    <p class="usage">
+      Alternativ: Text irgendwo kopieren und unten klicken — oder markierten
+      Text bzw. ein Bild einfach <strong>in dieses Fenster ziehen</strong>.
+    </p>
+    <div class="actions">
+      <button class="primary" on:click={stageFromClipboard}>
+        Zwischenablage schwärzen
+      </button>
+      <button on:click={() => setWidgetVisible(!settings.show_widget)}>
+        {settings.show_widget ? "Widget ausblenden" : "Widget einblenden"}
+      </button>
+    </div>
+    <p class="hint">
+      Das Ergebnis landet geschwärzt in der Zwischenablage und in der
+      Ablage. Schneller geht's mit dem Hotkey
+      <kbd>{prettyHotkey(settings.stage_hotkey)}</kbd> direkt auf einer
+      Markierung — oder per Klick aufs schwebende Widget
+      (Rechtsklick darauf: ausblenden).
+    </p>
+  </section>
+
+  <section class="card">
+    <h2>So nutzt du die App</h2>
+    <p class="usage">
+      In jeder App: Text kopieren, dann <kbd>{prettyHotkey(settings.hotkey)}</kbd>
+      statt <kbd>{prettyHotkey("CmdOrCtrl+V")}</kbd> drücken.
+    </p>
+    <ul class="bullets">
+      <li>Enthält der Text personenbezogene Daten → fügt die anonymisierte Version ein</li>
+      <li>Enthält der Text Tokens aus einer LLM-Antwort → fügt die Originale wieder ein</li>
+      <li>Sonst → fügt unverändert ein, wie ein normales <kbd>{prettyHotkey("CmdOrCtrl+V")}</kbd></li>
+    </ul>
+  </section>
+
   {/if}
 
   <footer>
@@ -883,6 +1052,7 @@
   .link-btn:hover { background: none; color: #1d4ed8; }
   .save-error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.4; }
   .drop-hint { background: #fff8e1; border: 1px solid #fde68a; color: #92400e; border-radius: 8px; padding: 12px 14px; margin-bottom: 16px; font-size: 13px; line-height: 1.4; }
+  .warning-box { background: #fff8e1; border-left: 3px solid #f59e0b; color: #92400e; border-radius: 3px; padding: 8px 12px; font-size: 13px; line-height: 1.4; }
   .card { background: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
   .card h2 { margin: 0 0 12px; font-size: 16px; }
   .usage { font-size: 15px; line-height: 1.5; }
@@ -891,6 +1061,21 @@
   kbd { background: #f3f4f6; border: 1px solid #d1d5db; padding: 1px 6px; border-radius: 3px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .mode-card { border-left: 3px solid #2563eb; }
   .stage-entry-card { border-left: 3px solid #171717; }
+  .paste-field {
+    width: 100%;
+    box-sizing: border-box;
+    resize: none;
+    font: inherit;
+    font-size: 13px;
+    color: #6b7280;
+    background: #fafafa;
+    border: 1.5px dashed #d1d5db;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+    caret-color: transparent; /* es wird nie Text angezeigt */
+  }
+  .paste-field:focus { outline: none; border-color: #2563eb; background: #eff6ff; }
   /* Vollflächiges Overlay während eines Text-Drags über dem Fenster.
      pointer-events: none, damit es die dragleave/drop-Events des <main>
      nicht selbst schluckt. */

@@ -6,7 +6,23 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
-_(noch nichts)_
+**Erweiterte Erkennung (NER) repariert + App-Tabs:**
+
+- **Der NER-Schalter wirkt jetzt wirklich.** Vorher: Der Tray-Haken flippte
+  nur das Setting und bat um Neustart — das Modell wurde nie geladen, und
+  das Setting wurde bei der Erkennung nicht einmal ausgewertet (lagen
+  Modell-Dateien vor, lief NER immer; fehlten sie, nie). Jetzt: Die
+  Erkennung prüft das Setting bei jedem Lauf, und die Engine lässt sich
+  zur Laufzeit (neu) laden.
+- **NER-Verwaltung im neuen Tab „Erkennung"** statt im Tray: Status
+  (Modell/Engine), Aktivieren lädt bei Bedarf zuerst das Modell (~145 MB)
+  und schaltet dann sofort scharf — **kein Neustart mehr nötig**,
+  Deaktivieren wirkt ebenfalls sofort. Der Tray-Eintrag ist entfallen
+  (Auto-Detection bleibt im Tray).
+- **Die App ist jetzt in vier Tabs organisiert** — Status, Ablage,
+  Erkennung, Einstellungen — statt einer langen Karten-Liste. Der
+  Verarbeitungsmodus (Reversibel/Strict) wohnt bei der Erkennung, alle
+  übrigen Einstellungen im Einstellungen-Tab.
 
 ---
 

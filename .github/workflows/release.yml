@@ -17,17 +17,24 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.platform }}
+    name: Build ${{ matrix.platform }} ${{ matrix.rust_target }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
-          - platform: macos-13          # Intel Mac Runner
+            rust_target: "aarch64-apple-darwin"
+          # Intel-macOS als CROSS-COMPILE auf dem arm64-Runner: GitHub hat
+          # die macos-13-Runner (letzte Intel-Runner) abgeschafft — der Job
+          # bekam nie eine Maschine und lief bei v0.5.0/v0.5.1/v0.6.0 in
+          # den 24h-Timeout; diese Releases haben deshalb kein Intel-DMG.
+          - platform: macos-latest
             args: "--target x86_64-apple-darwin"
+            rust_target: "x86_64-apple-darwin"
           - platform: windows-latest
             args: ""
+            rust_target: ""
 
     runs-on: ${{ matrix.platform }}
 
@@ -43,14 +50,14 @@ jobs:
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          # `targets` für die jeweilige Plattform-Architektur
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin' || matrix.platform == 'macos-13' && 'x86_64-apple-darwin' || '' }}
+          # `targets` für die jeweilige Ziel-Architektur (leer = Host)
+          targets: ${{ matrix.rust_target }}
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          key: release-${{ matrix.platform }}
+          key: release-${{ matrix.platform }}-${{ matrix.rust_target }}
 
       - name: Install frontend deps
         run: npm ci

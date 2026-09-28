@@ -252,3 +252,8 @@ jobs:
           cache: "npm"
       - name: npm audit (high+ only — moderate sind oft in Build-Tools)
         run: npm audit --audit-level=high
+      # `tauri build` bricht bei abweichenden Major.Minor-Versionen zwischen
+      # @tauri-apps/*-npm-Paketen und Rust-Crates ab; die CI baut kein
+      # Bundle, deshalb hier ein expliziter Check (Lehre aus v0.6.2).
+      - name: Tauri npm/crate versions match
+        run: node scripts/check-tauri-versions.mjs

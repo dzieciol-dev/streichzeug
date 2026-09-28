@@ -65,7 +65,9 @@ jobs:
       # macOS-Signing + Notarisierung. Die Tauri-CLI liest die APPLE_*-
       # Variablen aus der Umgebung: APPLE_CERTIFICATE (Developer-ID-
       # Application-.p12 als base64) wird in einen temporären Keychain
-      # importiert, notarisiert wird per App-Store-Connect-API-Key.
+      # importiert. Notarisiert wird per App-Store-Connect-API-Key
+      # (APPLE_API_*) oder, falls der fehlt, per Apple-ID mit
+      # app-spezifischem Passwort (APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID).
       # Fehlen die Secrets, bleiben die Variablen ungesetzt und der Build
       # läuft wie bisher unsigniert durch.
       - name: Configure macOS signing
@@ -77,6 +79,9 @@ jobs:
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -z "$APPLE_CERTIFICATE" ]; then
             echo "::warning::APPLE_CERTIFICATE nicht gesetzt — macOS-Build bleibt unsigniert."
@@ -95,8 +100,14 @@ jobs:
               echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
               echo "APPLE_API_KEY_PATH=$key_path"
             } >> "$GITHUB_ENV"
+          elif [ -n "$APPLE_ID" ]; then
+            {
+              echo "APPLE_ID=$APPLE_ID"
+              echo "APPLE_PASSWORD=$APPLE_PASSWORD"
+              echo "APPLE_TEAM_ID=$APPLE_TEAM_ID"
+            } >> "$GITHUB_ENV"
           else
-            echo "::warning::APPLE_API_KEY_P8 nicht gesetzt — signiert, aber nicht notarisiert."
+            echo "::warning::Keine Notarisierungs-Credentials gesetzt — signiert, aber nicht notarisiert."
           fi
 
       # NER-Feature aktivieren — Modell wird zur Laufzeit nachgeladen,

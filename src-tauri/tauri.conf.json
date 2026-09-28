@@ -34,7 +34,9 @@
     "publisher": "Streichzeug Contributors",
     "copyright": "Copyright (c) 2026 The Streichzeug Authors",
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "hardenedRuntime": true,
+      "entitlements": "./Entitlements.plist"
     }
   }
 }

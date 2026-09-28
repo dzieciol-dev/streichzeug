@@ -62,6 +62,43 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # macOS-Signing + Notarisierung. Die Tauri-CLI liest die APPLE_*-
+      # Variablen aus der Umgebung: APPLE_CERTIFICATE (Developer-ID-
+      # Application-.p12 als base64) wird in einen temporären Keychain
+      # importiert, notarisiert wird per App-Store-Connect-API-Key.
+      # Fehlen die Secrets, bleiben die Variablen ungesetzt und der Build
+      # läuft wie bisher unsigniert durch.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::APPLE_CERTIFICATE nicht gesetzt — macOS-Build bleibt unsigniert."
+            exit 0
+          fi
+          {
+            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE"
+            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY"
+          } >> "$GITHUB_ENV"
+          if [ -n "$APPLE_API_KEY_P8" ]; then
+            key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY}.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$key_path"
+            {
+              echo "APPLE_API_KEY=$APPLE_API_KEY"
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+              echo "APPLE_API_KEY_PATH=$key_path"
+            } >> "$GITHUB_ENV"
+          else
+            echo "::warning::APPLE_API_KEY_P8 nicht gesetzt — signiert, aber nicht notarisiert."
+          fi
+
       # NER-Feature aktivieren — Modell wird zur Laufzeit nachgeladen,
       # nicht im Bundle. `tauri.conf.json` deklariert keine Modell-
       # Resources mehr (siehe Public-Repo Release-Notes), daher braucht
@@ -95,21 +132,12 @@ jobs:
             Sobald wir Code-Signing eingerichtet haben, ist der Schritt
             nicht mehr nötig.
 
-            ### ⚠️ macOS: „App ist beschädigt"-Fehler
+            ### macOS
 
-            Die Bundles sind aktuell **nicht** Apple-Developer-signiert
-            (kein Apple Developer Account). Beim ersten Start blockt macOS
-            das DMG mit einer Quarantäne-Meldung. Behebung:
+            Die DMGs sind mit einer Apple Developer ID signiert und von
+            Apple notarisiert — die App startet ohne Quarantäne-Workaround.
 
-            ```bash
-            xattr -dr com.apple.quarantine /Applications/Streichzeug.app
-            ```
-
-            Danach App über Launchpad oder Finder starten — der Hinweis
-            bleibt aus. Sobald wir Code-Signing eingerichtet haben, ist
-            der Schritt nicht mehr nötig.
-
-            **Alternativ** über Homebrew, kein xattr-Schritt nötig:
+            **Alternativ** über Homebrew:
 
             ```bash
             brew install --cask dzieciol-dev/streichzeug/streichzeug

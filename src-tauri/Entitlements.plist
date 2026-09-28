@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Hardened Runtime erlaubt per dlopen nur Libraries mit derselben
+      Team-ID. Die ONNX-Runtime (libonnxruntime.dylib) wird für die
+      Erweiterte Erkennung zur Laufzeit ins App-Datenverzeichnis geladen
+      und ist von Microsoft nur ad-hoc signiert. Ohne dieses Entitlement
+      scheitert das Laden in der notarisierten App.
+      Ausgleich: ner.rs prüft die Library vor dem Laden gegen einen im
+      Binary gepinnten SHA-256 (Download-Pins + MANIFEST.sha256).
+      Alternative für später: ORT ins Bundle einbetten und mitsignieren,
+      dann kann dieses Entitlement entfallen.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

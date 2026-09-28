@@ -4,7 +4,7 @@ version = "0.6.1"
 description = "Streichzeug — PII-Erkennung und Pseudonymisierung in der Zwischenablage"
 edition = "2021"
 # 1.88 wegen image 0.25.10 (Stufe-3-Bild-Redaction); davor 1.80 (ammonia 4).
-rust-version = "1.88"
+rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dzieciol-dev/streichzeug"
 authors = ["Streichzeug Contributors"]

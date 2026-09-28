@@ -6,6 +6,25 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
+_(noch nichts)_
+
+---
+
+## 0.6.2 — Signierte macOS-App, Sicherheits-Updates (2026-09-28)
+
+**macOS signiert und notarisiert:**
+
+- Die DMGs sind mit einer Apple Developer ID signiert und von Apple
+  notarisiert. Der `xattr`-Workaround gegen die Meldung „App ist
+  beschädigt" entfällt.
+- Hardened Runtime aktiv. Weil die ONNX-Runtime für die Erweiterte
+  Erkennung zur Laufzeit nachgeladen wird und von Microsoft nur ad-hoc
+  signiert ist, erlaubt das Entitlement `disable-library-validation`
+  deren Laden; abgesichert über den SHA-256-Pin (siehe unten).
+- **Einmalig nach dem Update:** Weil sich die Signatur ändert, fragt
+  macOS die Bedienungshilfen-Freigabe ggf. erneut ab (Systemeinstellungen
+  → Datenschutz & Sicherheit → Bedienungshilfen → Streichzeug).
+
 **Sicherheit und Abhängigkeiten:**
 
 - **Modell-Download mit festen Hashes.** Modell und Tokenizer werden von

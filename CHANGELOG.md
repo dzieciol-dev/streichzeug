@@ -6,7 +6,25 @@ Versionierung folgt [SemVer](https://semver.org/) (Major.Minor.Patch).
 
 ## [Unreleased]
 
-_(noch nichts)_
+**Sicherheit und Abhängigkeiten:**
+
+- **Modell-Download mit festen Hashes.** Modell und Tokenizer werden von
+  einer festen Hugging-Face-Revision geladen (vorher `main`), und alle
+  Downloads inklusive ONNX-Runtime-Archiv werden gegen im Binary
+  hinterlegte SHA-256-Werte geprüft. Weicht ein Download ab, wird er
+  verworfen. Vorher wurde das Manifest aus dem Download selbst erzeugt
+  und schützte nur gegen spätere Veränderung.
+- Rust- und npm-Abhängigkeiten aktualisiert; behebt die offenen
+  Advisories (u. a. RUSTSEC-2026-0213 ammonia, RUSTSEC-2026-0285 rustls,
+  RUSTSEC-2026-0204, zurückgezogenes `spin`, postcss, nanoid).
+  Mindest-Rust-Version jetzt 1.90 (Tauri 2.12).
+
+**Doku:**
+
+- README: Strict-Modus nicht mehr pauschal als „anonym im Sinne von
+  ErwGr. 26 DSGVO" beschrieben; die Einordnung hängt vom Ergebnis im
+  Einzelfall ab. Der optionale Modell-Download ist als einzige
+  Netzverbindung benannt.
 
 ---
 

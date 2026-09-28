@@ -76,13 +76,19 @@ Secret. Die Mappings werden lokal in einer SQLite-Datenbank gespeichert
 **Reverse-Pfad:** Strg+Alt+B auf einer LLM-Antwort, die Tokens enthält,
 übersetzt die Tokens zurück in die Originale.
 
-### Strict (volle Anonymisierung)
+### Strict (ohne Rückübersetzung)
 
 Statt Tokens werden lesbare Platzhalter erzeugt: `«Person A»`,
 `«Organisation B»`, `«Ort C»`, … Pro Forward-Vorgang ein eigener Counter,
 und **keine Mapping-Tabelle wird angelegt** — die Zuordnung existiert
-weder lokal noch beim LLM. Damit gelten die Daten beim LLM-Anbieter als
-**anonym** im Sinne von ErwGr. 26 DSGVO.
+weder lokal noch beim LLM.
+
+Ob der Text danach **anonym** im Sinne von ErwGr. 26 DSGVO ist, hängt
+nicht allein vom Tool ab: Die Erkennung kann Namen oder Merkmale
+übersehen, und auch der verbleibende Kontext (Funktion, Ort, seltener
+Sachverhalt) kann eine Person identifizierbar machen. Strict senkt das
+Risiko deutlich, ersetzt aber keine Prüfung des Ergebnisses vor dem
+Absenden und keine datenschutzrechtliche Bewertung im Einzelfall.
 
 **Kein Reverse-Pfad** in Strict — der User muss die LLM-Antwort manuell
 auf den Kontext zurückführen.
@@ -91,8 +97,12 @@ auf den Kontext zurückführen.
 
 ## Privacy-Design
 
-- **Keine Outbound-Verbindungen** — die App ruft nichts im Netz auf.
-  Auditierbar per Wireshark, kein Telemetry-Code im Repo.
+- **Keine Outbound-Verbindungen mit Nutzdaten** — Erkennung und
+  Pseudonymisierung laufen vollständig lokal, kein Telemetry-Code im Repo.
+  Einzige Ausnahme: Wer die Erweiterte Erkennung aktiviert, löst einmalig
+  den Download des Modells (Hugging Face) und der ONNX-Runtime (GitHub)
+  aus; dabei wird kein Clipboard-Inhalt übertragen, die Dateien werden
+  per SHA-256 geprüft. Auditierbar per Wireshark.
 - **Pro-Installation-zufälliger Master-Secret** (32 Byte aus dem OS-RNG)
   in `$DATA_DIR/de.streichzeug.app/secret.bin` mit `0600`-Permissions
   auf Unix bzw. per-User-ACL auf Windows.

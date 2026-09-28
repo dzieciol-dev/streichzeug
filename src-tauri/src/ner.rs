@@ -1020,17 +1020,42 @@ mod downloader {
     use std::path::PathBuf;
     use tokio::io::AsyncWriteExt;
 
-    const MODEL_URL: &str = "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/main/onnx/model_quantized.onnx";
-    const TOKENIZER_URL: &str = "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/main/tokenizer.json";
-    fn ort_asset_url() -> &'static str {
+    // Modell und Tokenizer sind auf eine feste HF-Commit-Revision gepinnt
+    // (nicht `main`), die erwarteten SHA-256-Hashes stehen im Binary. Ein
+    // Download, der nicht exakt diesen Bytes entspricht, wird verworfen —
+    // das daraus erzeugte MANIFEST ist damit nicht mehr nur Trust-on-first-
+    // use. Hashes 2026-09-28 ermittelt: Modell gegen HF-LFS-OID, Modell,
+    // Tokenizer und ORT-arm64 zusätzlich gegen eine bestehende, funktionierende
+    // Installation; die übrigen ORT-Archive aus dem GitHub-Release-Download.
+    // Beim Revisions-Update: URL-Revision UND Hashes gemeinsam tauschen.
+    const MODEL_URL: &str = "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/c2a4dbf593c57f47004c5bc2d3770d311aee9c43/onnx/model_quantized.onnx";
+    const MODEL_SHA256: &str = "24a0b98f4dd4cd92842f5a541272f86f760225a64a29928eddef14bdb2edb986";
+    const TOKENIZER_URL: &str = "https://huggingface.co/Xenova/distilbert-base-multilingual-cased-ner-hrl/resolve/c2a4dbf593c57f47004c5bc2d3770d311aee9c43/tokenizer.json";
+    const TOKENIZER_SHA256: &str =
+        "bf1b59b7b11c95f194f51708d918eea378e09d05f84c0e1656dc5180e8117088";
+
+    /// ORT-Release-Archiv für die aktuelle Plattform: (URL, SHA-256 des Archivs).
+    fn ort_asset() -> (&'static str, &'static str) {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz";
+        return (
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-arm64-1.22.0.tgz",
+            "cab6dcbd77e7ec775390e7b73a8939d45fec3379b017c7cb74f5b204c1a1cc07",
+        );
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-x86_64-1.22.0.tgz";
+        return (
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-osx-x86_64-1.22.0.tgz",
+            "e4ec94a7696de74fb1b12846569aa94e499958af6ffa186022cfde16c9d617f0",
+        );
         #[cfg(target_os = "windows")]
-        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip";
+        return (
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-win-x64-1.22.0.zip",
+            "174c616efc0271194488642a72f1a514e01487da4dfe84c49296d66e40ebe0da",
+        );
         #[cfg(target_os = "linux")]
-        return "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz";
+        return (
+            "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz",
+            "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3",
+        );
     }
 
     /// Filename der ORT-Shared-Library für die aktuelle Plattform.
@@ -1054,17 +1079,23 @@ mod downloader {
 
         // 1. Modell-Datei (~145 MB)
         log::info!("ner download: model.onnx ({})", MODEL_URL);
-        download_to_file(&client, MODEL_URL, &dir.join("model.onnx")).await?;
+        download_to_file(&client, MODEL_URL, MODEL_SHA256, &dir.join("model.onnx")).await?;
 
         // 2. Tokenizer
         log::info!("ner download: tokenizer.json ({})", TOKENIZER_URL);
-        download_to_file(&client, TOKENIZER_URL, &dir.join("tokenizer.json")).await?;
+        download_to_file(
+            &client,
+            TOKENIZER_URL,
+            TOKENIZER_SHA256,
+            &dir.join("tokenizer.json"),
+        )
+        .await?;
 
-        // 3. ORT-Shared-Library — entpacke aus .tgz/.zip
-        let ort_url = ort_asset_url();
+        // 3. ORT-Shared-Library — Archiv-Hash prüfen, dann entpacken
+        let (ort_url, ort_sha256) = ort_asset();
         log::info!("ner download: ORT runtime ({})", ort_url);
         let archive_path = dir.join("ort_archive.bin");
-        download_to_file(&client, ort_url, &archive_path).await?;
+        download_to_file(&client, ort_url, ort_sha256, &archive_path).await?;
         extract_ort_lib(&archive_path, &dir.join(ort_lib_name()))?;
         let _ = tokio::fs::remove_file(&archive_path).await;
 
@@ -1077,12 +1108,36 @@ mod downloader {
 
     /// Streamt eine HTTP-Response in eine Datei. `tokio::fs::File` +
     /// `reqwest::Response::bytes_stream` halten den Speicher klein
-    /// (Chunk-für-Chunk statt voller Body im RAM).
+    /// (Chunk-für-Chunk statt voller Body im RAM). Der SHA-256 wird beim
+    /// Streamen mitgerechnet; weicht er von `expected_sha256` ab, wird die
+    /// Datei gelöscht und der Download schlägt fehl.
     async fn download_to_file(
         client: &reqwest::Client,
         url: &str,
+        expected_sha256: &str,
         path: &std::path::Path,
     ) -> Result<()> {
+        let result = stream_to_file(client, url, path).await.and_then(|actual| {
+            if actual.eq_ignore_ascii_case(expected_sha256) {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "Hash-Abweichung für {url}: erwartet {expected_sha256}, erhalten {actual}"
+                ))
+            }
+        });
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        result
+    }
+
+    /// Schreibt den Body nach `path` und liefert den SHA-256 (hex).
+    async fn stream_to_file(
+        client: &reqwest::Client,
+        url: &str,
+        path: &std::path::Path,
+    ) -> Result<String> {
         let resp = client
             .get(url)
             .send()
@@ -1093,15 +1148,17 @@ mod downloader {
         let mut file = tokio::fs::File::create(path)
             .await
             .with_context(|| format!("create {}", path.display()))?;
+        let mut hasher = Sha256::new();
         let mut stream = resp.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("stream {url}"))?;
+            hasher.update(&chunk);
             file.write_all(&chunk)
                 .await
                 .with_context(|| format!("write {}", path.display()))?;
         }
         file.flush().await?;
-        Ok(())
+        Ok(hex::encode(hasher.finalize()))
     }
 
     /// Entpackt die ORT-Shared-Library aus dem heruntergeladenen Archive.
@@ -1303,5 +1360,19 @@ mod diagnose_tests {
             findings.iter().any(|f| f.original.contains("Obst")),
             "Obst fehlt im Gesamtergebnis"
         );
+    }
+    /// Echter Download gegen HF/GitHub in ein Wegwerf-Verzeichnis — prüft,
+    /// dass die gepinnten Revisionen und Hashes noch stimmen. Netz nötig:
+    /// `STREICHZEUG_TEST_MODELS_DIR=/tmp/x cargo test --features ner -- --ignored download_matches_pinned_hashes`
+    #[test]
+    #[ignore]
+    fn download_matches_pinned_hashes() {
+        assert!(
+            std::env::var("STREICHZEUG_TEST_MODELS_DIR").is_ok(),
+            "STREICHZEUG_TEST_MODELS_DIR auf ein Wegwerf-Verzeichnis setzen"
+        );
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let dir = rt.block_on(super::downloader::run()).expect("download");
+        assert!(dir.join("MANIFEST.sha256").exists());
     }
 }

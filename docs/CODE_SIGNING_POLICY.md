@@ -5,11 +5,9 @@ Signaturen freigibt und welche Zusagen für signierte Programme gelten.
 
 ## Windows
 
-Free code signing provided by [SignPath.io](https://about.signpath.io/),
-certificate by [SignPath Foundation](https://signpath.org/).
-
-*(Gilt ab dem ersten Windows-Release, das über SignPath signiert wird.
-Bis dahin ist der Windows-Installer unsigniert.)*
+Der Windows-Installer ist derzeit nicht signiert. Geplant ist eine
+Signatur mit einem auf den Entwickler ausgestellten Code-Signing-
+Zertifikat; diese Policy wird dann um Aussteller und Ablauf ergänzt.
 
 ## macOS
 
@@ -18,9 +16,10 @@ von Apple notarisiert.
 
 ## Was signiert wird
 
-- Ausschließlich Release-Artefakte, die die GitHub-Actions-Pipeline
-  (`.github/workflows/release.yml`) aus einem Tag dieses Repositories
-  baut. Lokal gebaute Binaries werden nicht signiert.
+- Ausschließlich Release-Artefakte, die aus einem Tag dieses
+  Repositories gebaut werden (macOS: GitHub-Actions-Pipeline
+  `.github/workflows/release.yml`). Entwicklungs-Builds werden nicht
+  signiert.
 - Produktname und Version in den Datei-Metadaten entsprechen dem Release
   (`Streichzeug`, Version aus `tauri.conf.json`).
 - Fremdbibliotheken, die zur Laufzeit nachgeladen werden (ONNX Runtime,
@@ -33,12 +32,11 @@ von Apple notarisiert.
 | Rolle | Wer |
 |---|---|
 | Committer und Reviewer | [@dzieciol-dev](https://github.com/dzieciol-dev) |
-| Approver (Freigabe jeder Signatur) | [@dzieciol-dev](https://github.com/dzieciol-dev) |
+| Approver (Freigabe jedes Releases) | [@dzieciol-dev](https://github.com/dzieciol-dev) |
 
 Externe Beiträge werden vor dem Merge von einem Reviewer geprüft. Jede
 Signaturanfrage wird einzeln von einem Approver freigegeben. Alle
-Teammitglieder nutzen Zwei-Faktor-Authentifizierung für GitHub und
-SignPath.
+Teammitglieder nutzen Zwei-Faktor-Authentifizierung für GitHub.
 
 ## Datenschutz
 

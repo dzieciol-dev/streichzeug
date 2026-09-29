@@ -42,7 +42,8 @@ Funktionsbezeichnung (Muster „Leiter Kommunikation").
   SmartScreen-Warnung. Entschieden (2026-09-29): SignPath Foundation, da
   Streichzeug vollständig Open Source bleibt (eine etwaige Enterprise-
   Variante wird ein separates Tool). Policy: `docs/CODE_SIGNING_POLICY.md`.
-  Offen: Antrag stellen, nach Zusage SignPath-Schritt in `release.yml`.
+  Antrag gestellt am 2026-09-29. Offen: Zusage abwarten, dann SignPath-
+  Schritt in `release.yml` und API-Token als GitHub-Secret.
 - [ ] **Manuelle Verifikation auf Windows (#21).** Smart-Paste
   (Strg+Alt+B), Schwärz-Bühne (Strg+Alt+Shift+B, Button, Tray, Drag&Drop),
   synthetisches Strg+C (nur fester 150-ms-Puffer), Bild-OCR, NER-Download

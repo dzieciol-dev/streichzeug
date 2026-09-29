@@ -38,8 +38,11 @@ Funktionsbezeichnung (Muster „Leiter Kommunikation").
 
 ## Windows
 
-- [ ] **Code-Signing.** MSI ist unsigniert → SmartScreen-Warnung. Optionen
-  und Voraussetzungen siehe Abschnitt unten; Entscheidung offen.
+- [ ] **Code-Signing über SignPath Foundation.** MSI ist unsigniert →
+  SmartScreen-Warnung. Entschieden (2026-09-29): SignPath Foundation, da
+  Streichzeug vollständig Open Source bleibt (eine etwaige Enterprise-
+  Variante wird ein separates Tool). Policy: `docs/CODE_SIGNING_POLICY.md`.
+  Offen: Antrag stellen, nach Zusage SignPath-Schritt in `release.yml`.
 - [ ] **Manuelle Verifikation auf Windows (#21).** Smart-Paste
   (Strg+Alt+B), Schwärz-Bühne (Strg+Alt+Shift+B, Button, Tray, Drag&Drop),
   synthetisches Strg+C (nur fester 150-ms-Puffer), Bild-OCR, NER-Download
@@ -63,7 +66,7 @@ Funktionsbezeichnung (Muster „Leiter Kommunikation").
 
 | Weg | Kosten | Voraussetzungen / Haken |
 |---|---|---|
-| SignPath Foundation | kostenlos | OSS-Lizenz + öffentliches Repo (erfüllt); Antrag + Prüfung; Signatur nur für Builds aus der CI des Repos; Bedingungen bei kommerziellen Zusatzangeboten vorab klären |
+| SignPath Foundation | kostenlos | OSS-Lizenz + öffentliches Repo (erfüllt); Antrag + Prüfung; Signatur nur für Builds aus der CI des Repos; keine kommerzielle Doppellizenz im Repo (erfüllt) |
 | Azure Artifact Signing (vormals Trusted Signing) | ca. 10 USD/Monat | Identitätsprüfung; Verfügbarkeit für Einzelpersonen/Kleinunternehmer in DE prüfen; Microsoft-Cloud, übertragen werden nur Datei-Hashes |
 | Klassisches OV-Zertifikat | ca. 200–400 €/Jahr | Schlüssel muss seit 2023 auf Hardware-Token/HSM liegen → CI-Integration umständlich |
 

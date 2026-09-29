@@ -157,7 +157,11 @@ Doppelklick → SmartScreen kann „Computer wurde geschützt" zeigen
 (unsignierter Installer) → „Weitere Informationen" → „Trotzdem
 ausführen".
 
-Welche Dateien wie signiert werden, steht in der
+**Code-Signing:** Windows-Builds werden über die SignPath Foundation
+signiert (beantragt): *Free code signing provided by
+[SignPath.io](https://about.signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/).* macOS-Builds sind mit einer
+Apple Developer ID signiert und notarisiert. Details:
 [Code-Signing-Policy](docs/CODE_SIGNING_POLICY.md).
 
 ---

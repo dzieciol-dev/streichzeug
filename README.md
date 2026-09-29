@@ -153,15 +153,15 @@ geöffnet werden soll.
 
 MSI-Installer aus den
 [GitHub Releases](https://github.com/dzieciol-dev/streichzeug/releases).
-Doppelklick → SmartScreen kann „Computer wurde geschützt" zeigen
-(unsignierter Installer) → „Weitere Informationen" → „Trotzdem
-ausführen".
+Der Installer ist derzeit **nicht signiert**: Doppelklick → SmartScreen
+zeigt „Der Computer wurde durch Windows geschützt" → „Weitere
+Informationen" → „Trotzdem ausführen".
 
-**Code-Signing:** Windows-Builds werden über die SignPath Foundation
-signiert (beantragt): *Free code signing provided by
-[SignPath.io](https://about.signpath.io/), certificate by
-[SignPath Foundation](https://signpath.org/).* macOS-Builds sind mit einer
-Apple Developer ID signiert und notarisiert. Details:
+Die Installation braucht **Administratorrechte**. Auf verwalteten
+Büro-PCs installiert deshalb in der Regel die IT.
+
+**Code-Signing:** macOS-Builds sind mit einer Apple Developer ID signiert
+und notarisiert; Windows-Signing ist geplant. Details:
 [Code-Signing-Policy](docs/CODE_SIGNING_POLICY.md).
 
 ---

@@ -38,12 +38,18 @@ Funktionsbezeichnung (Muster „Leiter Kommunikation").
 
 ## Windows
 
-- [ ] **Code-Signing über SignPath Foundation.** MSI ist unsigniert →
-  SmartScreen-Warnung. Entschieden (2026-09-29): SignPath Foundation, da
-  Streichzeug vollständig Open Source bleibt (eine etwaige Enterprise-
-  Variante wird ein separates Tool). Policy: `docs/CODE_SIGNING_POLICY.md`.
-  Antrag gestellt am 2026-09-29. Offen: Zusage abwarten, dann SignPath-
-  Schritt in `release.yml` und API-Token als GitHub-Secret.
+- [ ] **Windows-Code-Signing.** MSI ist unsigniert → SmartScreen-Warnung;
+  Installation braucht zudem Adminrechte (auf verwalteten PCs → IT).
+  SignPath Foundation hat den Antrag vom 2026-09-29 am selben Tag abgelehnt
+  (zu wenig öffentliche Sichtbarkeit: Stars, Forks, Erwähnungen; erneute
+  Bewerbung ausdrücklich möglich). Plan (Entscheidung 2026-09-29):
+  1. Vorerst unsigniert; Installation für Workshop-Teilnehmende über die IT.
+  2. Windows-Test (#21) abwarten.
+  3. Bei Bedarf Certum-Open-Source-Zertifikat (ab ca. 69 € inkl.
+     Kryptokarte + Leser; Signatur „Open Source Developer, <Name>") und
+     lokal am Windows-PC signieren (Tauri `bundle.windows.signCommand`),
+     danach `docs/CODE_SIGNING_POLICY.md` ergänzen.
+  4. SignPath-Neubewerbung, sobald das Projekt sichtbarer ist.
 - [ ] **Manuelle Verifikation auf Windows (#21)** — Ablauf:
   `docs/WINDOWS_TESTCHECKLISTE.md`. Smart-Paste
   (Strg+Alt+B), Schwärz-Bühne (Strg+Alt+Shift+B, Button, Tray, Drag&Drop),
@@ -61,13 +67,14 @@ Funktionsbezeichnung (Muster „Leiter Kommunikation").
   sinkt die Qualität. Prüfen und ggf. Hinweis in der Bühne.
 - [ ] **Optional: winget-Paket** als Gegenstück zum Homebrew-Tap.
 
-### Windows-Signing — Optionen
+### Windows-Signing — Optionen (Stand 2026-09-29)
 
 | Weg | Kosten | Voraussetzungen / Haken |
 |---|---|---|
-| SignPath Foundation | kostenlos | OSS-Lizenz + öffentliches Repo (erfüllt); Antrag + Prüfung; Signatur nur für Builds aus der CI des Repos; keine kommerzielle Doppellizenz im Repo (erfüllt) |
-| Azure Artifact Signing (vormals Trusted Signing) | ca. 10 USD/Monat | Identitätsprüfung; Verfügbarkeit für Einzelpersonen/Kleinunternehmer in DE prüfen; Microsoft-Cloud, übertragen werden nur Datei-Hashes |
-| Klassisches OV-Zertifikat | ca. 200–400 €/Jahr | Schlüssel muss seit 2023 auf Hardware-Token/HSM liegen → CI-Integration umständlich |
+| SignPath Foundation | kostenlos | Abgelehnt 2026-09-29 (Sichtbarkeit); Neubewerbung später möglich |
+| Certum Open Source Code Signing | ab ca. 69 € (Satz mit Karte + Leser; Verlängerungspreis prüfen) | Für einzelne OSS-Entwickler; Schlüssel auf Kryptokarte → Signieren lokal am Windows-PC, nicht in der CI |
+| Azure Artifact Signing | Monatsabo | Einzelentwickler nur USA/Kanada; EU nur als Organisation mit Registerdaten — für ein Einzelunternehmen ohne HR-Eintrag unsicher |
+| Klassisches OV-Zertifikat | ca. 200–400 €/Jahr | Schlüssel auf Hardware-Token/HSM |
 
 Für alle Wege gilt: SmartScreen baut Reputation erst über Downloads auf;
 auch signierte Installer können anfangs noch warnen.

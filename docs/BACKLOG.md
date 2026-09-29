@@ -44,7 +44,8 @@ Funktionsbezeichnung (Muster „Leiter Kommunikation").
   Variante wird ein separates Tool). Policy: `docs/CODE_SIGNING_POLICY.md`.
   Antrag gestellt am 2026-09-29. Offen: Zusage abwarten, dann SignPath-
   Schritt in `release.yml` und API-Token als GitHub-Secret.
-- [ ] **Manuelle Verifikation auf Windows (#21).** Smart-Paste
+- [ ] **Manuelle Verifikation auf Windows (#21)** — Ablauf:
+  `docs/WINDOWS_TESTCHECKLISTE.md`. Smart-Paste
   (Strg+Alt+B), Schwärz-Bühne (Strg+Alt+Shift+B, Button, Tray, Drag&Drop),
   synthetisches Strg+C (nur fester 150-ms-Puffer), Bild-OCR, NER-Download
   inkl. ZIP-Entpacken und gepinntem Hash des Windows-ORT-Archivs (nur gegen
@@ -58,9 +59,6 @@ Funktionsbezeichnung (Muster „Leiter Kommunikation").
 - [ ] **OCR-Sprache.** `OcrEngine::TryCreateFromUserProfileLanguages` nutzt
   die Sprachen des Benutzerprofils; fehlt das deutsche OCR-Sprachpaket,
   sinkt die Qualität. Prüfen und ggf. Hinweis in der Bühne.
-- [ ] **Release-Notes korrigieren.** Nennen `*_x64-setup.exe`, gebaut wird
-  nur das MSI (`bundle.targets = ["msi", "dmg"]`). Entweder NSIS-Installer
-  ergänzen oder Text anpassen.
 - [ ] **Optional: winget-Paket** als Gegenstück zum Homebrew-Tap.
 
 ### Windows-Signing — Optionen
